@@ -105,35 +105,46 @@ oras discover --format json registry/image:tag | \
   jq '.referrers[] | select(.annotations["dev.tekton.artifact/pipelinerun"]=="my-run")'
 ```
 
+## Full pipeline (`--full`)
+
+The full pipeline adds SBOM generation (syft) and documentation:
+
+```bash
+./hack/run.sh --full
+```
+
+```
+git-clone → build-image ─┬─→ generate-sbom ──┐
+           run-tests ────┤                    ├→ attach-all-artifacts
+           generate-docs ┘                    │
+```
+
 ## Key advantage: ecosystem native
 
 Referrers accumulate on the image — cosign signatures, SBOMs, SLSA
-attestations, and now build artifacts all live in the same graph:
+attestations, and now build artifacts all live in the same graph.
+
+Real output from ghcr.io (`cosign tree`):
 
 ```
-image@sha256:8585...
-├── cosign signature          (already works today)
-├── SLSA attestation          (Tekton Chains)
-├── SBOM                      (syft/trivy)
-├── test results              (this PoC)    ← NEW
-└── coverage report           (this PoC)    ← NEW
+ghcr.io/vdemeester/tekton-experiments:latest
+├── 🔐 Attestations (Tekton Chains SLSA provenance)
+│   ├── sha256:cf27bc70...
+│   └── sha256:73007a58...
+├── 🔐 Signatures (Tekton Chains cosign)
+│   └── sha256:833c9320...
+├── 🔐 SBOMs (ko-generated SPDX)
+│   └── sha256:8136b512...
+├── 📦 coverage.out (OCI referrer)
+├── 📦 images-manifest.json (OCI referrer)
+└── 📦 junit-results.xml (OCI referrer)
 ```
-
-## Layers vs Referrers comparison
-
-See also: [`build-artifact-bundle/`](../build-artifact-bundle/) for the layers approach.
-
-| | **Layers** | **Referrers** |
-|---|---|---|
-| Model | One manifest, multiple layers | Multiple manifests, linked via `subject` |
-| Discovery | `oras manifest fetch` → layers | `oras discover` → referrer tree |
-| Anchor | Own tag (`bundle:latest`) | The built image (`app@sha256:...`) |
-| Ecosystem | Custom convention | Native (cosign, SBOM, Chains) |
-| History | One snapshot per tag | Referrers accumulate per digest |
-| GC | Delete tag → gone | Registry-dependent |
 
 ## Files
 
 - `01-tasks.yaml` — StepActions + Tasks (clone, build, test, attach)
-- `02-pipeline.yaml` — Pipeline
+- `01-extras.yaml` — Extra tasks for full pipeline (SBOM, docs, attach-all)
+- `02-pipeline.yaml` — Basic pipeline (build + test + attach)
+- `02-pipeline-full.yaml` — Full pipeline (+ SBOM, docs)
 - `run.yaml` — Example PipelineRun (local registry)
+- `run-full.yaml` — Example PipelineRun for full pipeline
