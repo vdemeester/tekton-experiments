@@ -1,0 +1,19 @@
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: build-full-
+spec:
+  pipelineRef:
+    name: build-artifact-referrers-full
+  params:
+    - name: git-url
+      value: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      value: main
+    - name: image-registry
+      value: tekton-registry:5000/tekton-experiments
+    - name: artifact-store
+      value: tekton-registry:5000/tekton-experiments/artifacts
+    - name: version-tag
+      value: latest

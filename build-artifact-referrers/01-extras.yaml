@@ -1,0 +1,279 @@
+---
+# Task: generate-sbom
+# Runs syft against the built image and pushes the SBOM as an OCI artifact.
+# Note: ko already generates a basic SBOM (SPDX) via cosign tag scheme.
+# This task shows how to generate a richer SBOM with syft and attach it
+# as a referrer — the way the ecosystem is moving.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: generate-sbom
+spec:
+  params:
+    - name: image-ref
+      description: Image to scan
+    - name: artifact-store
+  results:
+    - name: sbom-artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: scan
+      image: docker.io/anchore/syft:latest
+      env:
+        - name: IMAGE_REF
+          value: $(params.image-ref)
+        - name: SYFT_REGISTRY_INSECURE_USE_HTTP
+          value: "true"
+      args:
+        - "registry:$(params.image-ref)"
+        - "--output"
+        - "spdx-json=/var/workdir/sbom.spdx.json"
+        - "--platform"
+        - "linux/amd64"
+    - name: create-sbom-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: sbom.spdx.json
+        - name: path
+          value: /var/workdir/sbom.spdx.json
+    - name: export-result
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: URI
+          value: $(steps.create-sbom-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${URI}" > $(results.sbom-artifact.path)
+---
+# Task: generate-docs
+# Generates Go documentation and a rendered README, pushes as OCI artifact.
+# Silly? A bit. But proves any build output can be a referrer.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: generate-docs
+spec:
+  params:
+    - name: source-artifact
+    - name: go-version
+      default: "1.26"
+    - name: artifact-store
+  results:
+    - name: docs-artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: use-source
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.source-artifact)
+        - name: path
+          value: /var/workdir/source
+    - name: generate
+      image: docker.io/library/golang:$(params.go-version)
+      script: |
+        #!/bin/bash
+        set -ex
+        cd /var/workdir/source
+        mkdir -p /var/workdir/docs
+
+        # Generate go doc output for all packages
+        go doc -all ./pkg/greeting/ > /var/workdir/docs/godoc-greeting.txt 2>&1 || true
+        go doc -all . > /var/workdir/docs/godoc-main.txt 2>&1 || true
+
+        # Convert README.md to simple HTML
+        cat > /var/workdir/docs/index.html <<'HTMLEOF'
+        <!DOCTYPE html>
+        <html><head><meta charset="utf-8"><title>tekton-experiments docs</title>
+        <style>body{font-family:sans-serif;max-width:800px;margin:2em auto;padding:0 1em}
+        pre{background:#f4f4f4;padding:1em;overflow-x:auto}code{background:#f4f4f4;padding:2px 4px}</style>
+        </head><body>
+        HTMLEOF
+
+        # Simple markdown-to-html (good enough for a PoC)
+        sed 's/^# \(.*\)/<h1>\1<\/h1>/;
+             s/^## \(.*\)/<h2>\1<\/h2>/;
+             s/^### \(.*\)/<h3>\1<\/h3>/;
+             s/^- \(.*\)/<li>\1<\/li>/;
+             s/`\([^`]*\)`/<code>\1<\/code>/g;
+             s/\*\*\([^*]*\)\*\*/<strong>\1<\/strong>/g;
+             /^```/,/^```/s/.*/\&/;
+             /^$/s/^$/<br\/>/;' README.md >> /var/workdir/docs/index.html
+
+        echo "</body></html>" >> /var/workdir/docs/index.html
+
+        echo "Generated docs:"
+        ls -la /var/workdir/docs/
+    - name: create-docs-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: docs
+        - name: path
+          value: /var/workdir/docs
+    - name: export-result
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: URI
+          value: $(steps.create-docs-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${URI}" > $(results.docs-artifact.path)
+---
+# Task: attach-all-artifacts
+# Enhanced version of attach-artifacts that includes SBOM and docs.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: attach-all-artifacts
+spec:
+  params:
+    - name: image-ref
+    - name: images-artifact
+    - name: junit-artifact
+    - name: coverage-artifact
+    - name: sbom-artifact
+    - name: docs-artifact
+    - name: pipelinerun-name
+      default: unknown
+    - name: git-sha
+      default: unknown
+  results:
+    - name: referrer-count
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: fetch-images
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.images-artifact)
+        - name: path
+          value: /var/workdir/images
+    - name: fetch-junit
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.junit-artifact)
+        - name: path
+          value: /var/workdir/junit
+    - name: fetch-coverage
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.coverage-artifact)
+        - name: path
+          value: /var/workdir/coverage
+    - name: fetch-sbom
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.sbom-artifact)
+        - name: path
+          value: /var/workdir/sbom
+    - name: fetch-docs
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.docs-artifact)
+        - name: path
+          value: /var/workdir/docs
+    - name: attach-referrers
+      image: ghcr.io/oras-project/oras:v1.2.2
+      env:
+        - name: IMAGE_REF
+          value: $(params.image-ref)
+        - name: PIPELINERUN
+          value: $(params.pipelinerun-name)
+        - name: GIT_SHA
+          value: $(params.git-sha)
+      script: |
+        #!/bin/sh
+        set -ex
+
+        # Flatten all artifacts into one directory
+        mkdir -p /tmp/attach
+        cp /var/workdir/images/images-manifest.json /tmp/attach/
+        cp /var/workdir/junit/junit-results.xml /tmp/attach/
+        cp /var/workdir/coverage/coverage.out /tmp/attach/
+        cp /var/workdir/sbom/sbom.spdx.json /tmp/attach/
+        # Docs is a directory — tar it
+        tar -czf /tmp/attach/docs.tar.gz -C /var/workdir/docs .
+        cd /tmp/attach
+
+        COMMON="dev.tekton.artifact/pipelinerun=${PIPELINERUN} dev.tekton.artifact/git-sha=${GIT_SHA}"
+
+        attach() {
+          local file="$1" type="$2" task="$3"
+          shift 3
+          ANNOT_FLAGS=""
+          for pair in ${COMMON} "dev.tekton.artifact/task=${task}" "$@"; do
+            ANNOT_FLAGS="${ANNOT_FLAGS} --annotation ${pair}"
+          done
+          oras attach --plain-http \
+            --artifact-type "${type}" \
+            ${ANNOT_FLAGS} \
+            "${IMAGE_REF}" \
+            "${file}:${type}"
+        }
+
+        attach images-manifest.json \
+          "application/vnd.tekton.artifact.images.v1+json" \
+          "build-image" \
+          "dev.tekton.artifact/build-output=true"
+
+        attach junit-results.xml \
+          "application/vnd.tekton.artifact.junit.v1+xml" \
+          "run-tests"
+
+        attach coverage.out \
+          "application/vnd.tekton.artifact.coverage.v1" \
+          "run-tests"
+
+        attach sbom.spdx.json \
+          "application/spdx+json" \
+          "generate-sbom"
+
+        attach docs.tar.gz \
+          "application/vnd.tekton.artifact.docs.v1+gzip" \
+          "generate-docs"
+
+        echo ""
+        echo "=== Referrer tree ==="
+        oras discover --plain-http "${IMAGE_REF}"
+
+        COUNT=$(oras discover --plain-http --format json "${IMAGE_REF}" | grep -c '"artifactType"')
+        echo -n "${COUNT}" > $(results.referrer-count.path)
+
+        echo ""
+        echo "Attached ${COUNT} referrers to ${IMAGE_REF}"

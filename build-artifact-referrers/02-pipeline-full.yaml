@@ -1,0 +1,128 @@
+---
+# Full pipeline: build + test + SBOM + docs + attach as referrers.
+# Chains adds SLSA attestation automatically (configured for OCI storage).
+#
+# Result:
+#   oras discover <image>
+#   ├── images-manifest.json         (build metadata)
+#   ├── junit-results.xml            (test results)
+#   ├── coverage.out                 (test coverage)
+#   ├── sbom.spdx.json               (SBOM via syft)
+#   ├── docs.tar.gz                  (go doc + HTML README)
+#   └── in-toto attestation          (SLSA provenance via Chains)
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-artifact-referrers-full
+spec:
+  description: |
+    Full supply chain pipeline: build, test, SBOM, docs — all attached
+    as OCI referrers to the built image. Chains adds SLSA attestation.
+  params:
+    - name: git-url
+      default: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      default: main
+    - name: image-registry
+      default: tekton-registry:5000/tekton-experiments
+    - name: artifact-store
+      default: tekton-registry:5000/tekton-experiments/artifacts
+    - name: version-tag
+      default: latest
+  results:
+    - name: image-ref
+      value: $(tasks.build-image.results.image-ref)
+    - name: tests-passed
+      value: $(tasks.run-tests.results.tests-passed)
+    - name: coverage
+      value: $(tasks.run-tests.results.coverage-pct)
+    - name: referrer-count
+      value: $(tasks.attach.results.referrer-count)
+  tasks:
+    # 1. Clone source
+    - name: git-clone
+      taskRef:
+        name: git-clone-oci
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    # 2a. Build container image (parallel)
+    - name: build-image
+      runAfter: [git-clone]
+      taskRef:
+        name: build-image
+      params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
+        - name: image-registry
+          value: $(params.image-registry)
+        - name: image-tag
+          value: $(params.version-tag)
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    # 2b. Run tests (parallel)
+    - name: run-tests
+      runAfter: [git-clone]
+      taskRef:
+        name: run-tests
+      params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
+        - name: packages
+          value: "./..."
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    # 2c. Generate docs (parallel)
+    - name: generate-docs
+      runAfter: [git-clone]
+      taskRef:
+        name: generate-docs
+      params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    # 3. Generate SBOM (needs the built image)
+    - name: generate-sbom
+      runAfter: [build-image]
+      taskRef:
+        name: generate-sbom
+      params:
+        - name: image-ref
+          value: $(tasks.build-image.results.image-ref)
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    # 4. Attach everything as referrers to the built image
+    - name: attach
+      runAfter: [build-image, run-tests, generate-sbom, generate-docs]
+      taskRef:
+        name: attach-all-artifacts
+      params:
+        - name: image-ref
+          value: $(tasks.build-image.results.image-ref)
+        - name: images-artifact
+          value: $(tasks.build-image.results.images-artifact)
+        - name: junit-artifact
+          value: $(tasks.run-tests.results.junit-artifact)
+        - name: coverage-artifact
+          value: $(tasks.run-tests.results.coverage-artifact)
+        - name: sbom-artifact
+          value: $(tasks.generate-sbom.results.sbom-artifact)
+        - name: docs-artifact
+          value: $(tasks.generate-docs.results.docs-artifact)
+        - name: pipelinerun-name
+          value: $(context.pipelineRun.name)
+        - name: git-sha
+          value: $(tasks.git-clone.results.commit)
+
+    # Chains adds SLSA attestation automatically after build-image completes.
+    # No task needed — the controller watches TaskRun completions.

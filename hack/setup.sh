@@ -149,6 +149,49 @@ kubectl wait --for=condition=available --timeout=120s \
 log "Tekton Chains $(kubectl get deploy tekton-chains-controller -n tekton-chains \
     -o jsonpath='{.metadata.labels.app\.kubernetes\.io/version}') ready"
 
+# ── Configure Chains for OCI storage ───────────────────────────────
+log "Configuring Chains for OCI storage with local registry..."
+
+# Generate cosign key pair for signing
+COSIGN_DIR=$(mktemp -d)
+COSIGN_PASSWORD="" cosign generate-key-pair --output-key-prefix="${COSIGN_DIR}/cosign" 2>/dev/null
+
+# Replace the signing-secrets secret with our key pair
+kubectl delete secret signing-secrets -n tekton-chains 2>/dev/null || true
+kubectl create secret generic signing-secrets -n tekton-chains \
+    --from-file=cosign.key="${COSIGN_DIR}/cosign.key" \
+    --from-file=cosign.pub="${COSIGN_DIR}/cosign.pub" \
+    --from-literal=cosign.password=""
+
+# Copy public key for verification
+cp "${COSIGN_DIR}/cosign.pub" "${KUBECONFIG_PATH%.kubeconfig}.cosign.pub"
+rm -rf "${COSIGN_DIR}"
+
+# Configure Chains:
+# - OCI storage for TaskRun and PipelineRun attestations
+# - Insecure registry (local HTTP registry)
+# - SLSA v1 format
+# - Deep inspection for PipelineRun (captures task-level results)
+# - No storage.oci.repository → attestations stored alongside the image (as referrers)
+kubectl patch configmap chains-config -n tekton-chains --type merge -p '{
+  "data": {
+    "artifacts.taskrun.format": "slsa/v2alpha4",
+    "artifacts.taskrun.storage": "oci",
+    "artifacts.pipelinerun.format": "slsa/v2alpha4",
+    "artifacts.pipelinerun.storage": "oci",
+    "artifacts.pipelinerun.enable-deep-inspection": "true",
+    "artifacts.oci.storage": "oci",
+    "storage.oci.repository.insecure": "true"
+  }
+}'
+
+# Restart Chains to pick up new config + keys
+kubectl rollout restart deployment tekton-chains-controller -n tekton-chains
+kubectl wait --for=condition=available --timeout=60s \
+    deployment/tekton-chains-controller -n tekton-chains
+
+log "Chains configured (OCI storage, insecure registry, cosign keys generated)"
+
 # ── Summary ─────────────────────────────────────────────────────────
 echo ""
 log "Setup complete!"

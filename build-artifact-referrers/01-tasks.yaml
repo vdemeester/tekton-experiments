@@ -139,6 +139,10 @@ spec:
   results:
     - name: image-ref
       description: Full image reference with digest
+    - name: IMAGE_URL
+      description: Image URL (Chains type hinting)
+    - name: IMAGE_DIGEST
+      description: Image digest (Chains type hinting)
     - name: images-artifact
       description: OCI URI for the images manifest artifact
   volumes:
@@ -176,6 +180,10 @@ spec:
           --insecure-registry)
         echo "Built image: ${IMAGE_REF}"
         echo -n "${IMAGE_REF}" > $(results.image-ref.path)
+
+        # Chains type hinting — IMAGE_URL + IMAGE_DIGEST
+        echo -n "$(echo ${IMAGE_REF} | cut -d@ -f1)" > $(results.IMAGE_URL.path)
+        echo -n "$(echo ${IMAGE_REF} | cut -d@ -f2)" > $(results.IMAGE_DIGEST.path)
 
         cat > /var/workdir/images-manifest.json <<EOF
         {
