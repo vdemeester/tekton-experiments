@@ -100,10 +100,13 @@ steps:
 
 ---
 
-All approaches use the same **shared primitives**:
+All PoC experiments use the same **shared primitives**:
 - `create-oci-artifact` / `use-oci-artifact` StepActions for OCI transport
 - `emptyDir` volumes (no PVCs)
 - `oras` for OCI artifact operations
+
+With TEP-0164, **none of these are needed** — the controller and
+entrypoint handle OCI transport transparently.
 
 ## About
 
