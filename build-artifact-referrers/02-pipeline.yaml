@@ -32,6 +32,9 @@ spec:
       default: tekton-registry:5000/tekton-experiments/artifacts
     - name: version-tag
       default: latest
+    - name: insecure
+      description: Use plain HTTP for OCI operations (local registry)
+      default: "false"
   results:
     - name: image-ref
       description: Built image reference
@@ -54,6 +57,8 @@ spec:
           value: $(params.git-revision)
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     - name: build-image
       runAfter: [git-clone]
@@ -68,6 +73,8 @@ spec:
           value: $(params.version-tag)
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     - name: run-tests
       runAfter: [git-clone]
@@ -80,6 +87,8 @@ spec:
           value: "./..."
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     - name: attach
       runAfter: [build-image, run-tests]
@@ -98,3 +107,5 @@ spec:
           value: $(context.pipelineRun.name)
         - name: git-sha
           value: $(tasks.git-clone.results.commit)
+        - name: insecure
+          value: $(params.insecure)

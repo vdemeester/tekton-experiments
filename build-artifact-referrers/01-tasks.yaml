@@ -38,7 +38,9 @@ spec:
     fi
     DIGEST=$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)
     cd "${ARCHIVE_DIR}"
-    oras push --plain-http "${STORE}" "${ARTIFACT_NAME}"
+    ORAS_OPTS=""
+    [ "${INSECURE:-false}" = "true" ] && ORAS_OPTS="--plain-http"
+    oras push ${ORAS_OPTS} "${STORE}" "${ARTIFACT_NAME}"
     echo -n "oci:${STORE}@sha256:${DIGEST}" > $(step.results.uri.path)
     echo "Pushed artifact ${ARTIFACT_NAME}: sha256:${DIGEST}"
 ---
@@ -65,7 +67,9 @@ spec:
     set -ex
     REF="${URI#oci:}"
     mkdir -p "${DEST}"
-    oras blob fetch --plain-http "${REF}" --output - | tar -xzf - -C "${DEST}"
+    ORAS_OPTS=""
+    [ "${INSECURE:-false}" = "true" ] && ORAS_OPTS="--plain-http"
+    oras blob fetch ${ORAS_OPTS} "${REF}" --output - | tar -xzf - -C "${DEST}"
     echo "Restored artifact to ${DEST}"
 ---
 # Task: git-clone-oci
@@ -79,6 +83,8 @@ spec:
     - name: revision
       default: main
     - name: artifact-store
+    - name: insecure
+      default: "false"
   results:
     - name: commit
     - name: source-artifact
@@ -86,6 +92,9 @@ spec:
     - name: workdir
       emptyDir: {}
   stepTemplate:
+    env:
+      - name: INSECURE
+        value: $(params.insecure)
     volumeMounts:
       - name: workdir
         mountPath: /var/workdir
@@ -136,6 +145,8 @@ spec:
     - name: image-tag
       default: latest
     - name: artifact-store
+    - name: insecure
+      default: "false"
   results:
     - name: image-ref
       description: Full image reference with digest
@@ -149,6 +160,11 @@ spec:
     - name: workdir
       emptyDir: {}
   stepTemplate:
+    env:
+      - name: INSECURE
+        value: $(params.insecure)
+      - name: INSECURE_REGISTRY
+        value: $(params.insecure)
     volumeMounts:
       - name: workdir
         mountPath: /var/workdir
@@ -177,7 +193,7 @@ spec:
           --platform=linux/amd64 \
           -t "${IMAGE_TAG}" \
           --bare \
-          --insecure-registry)
+          --insecure-registry=${INSECURE_REGISTRY:-true})
         echo "Built image: ${IMAGE_REF}"
         echo -n "${IMAGE_REF}" > $(results.image-ref.path)
 
@@ -231,6 +247,8 @@ spec:
     - name: go-version
       default: "1.26"
     - name: artifact-store
+    - name: insecure
+      default: "false"
   results:
     - name: tests-passed
     - name: coverage-pct
@@ -240,6 +258,9 @@ spec:
     - name: workdir
       emptyDir: {}
   stepTemplate:
+    env:
+      - name: INSECURE
+        value: $(params.insecure)
     volumeMounts:
       - name: workdir
         mountPath: /var/workdir
@@ -335,6 +356,8 @@ spec:
       default: unknown
     - name: git-sha
       default: unknown
+    - name: insecure
+      default: "false"
   results:
     - name: referrer-count
       description: Number of referrers attached
@@ -342,6 +365,9 @@ spec:
     - name: workdir
       emptyDir: {}
   stepTemplate:
+    env:
+      - name: INSECURE
+        value: $(params.insecure)
     volumeMounts:
       - name: workdir
         mountPath: /var/workdir
@@ -401,7 +427,9 @@ spec:
           for pair in ${COMMON_ANNOT} "dev.tekton.artifact/task=${task}" "$@"; do
             ANNOT_FLAGS="${ANNOT_FLAGS} --annotation ${pair}"
           done
-          oras attach --plain-http \
+          ORAS_OPTS=""
+          [ "${INSECURE:-false}" = "true" ] && ORAS_OPTS="--plain-http"
+          oras attach ${ORAS_OPTS} \
             --artifact-type "${type}" \
             ${ANNOT_FLAGS} \
             "${IMAGE_REF}" \
@@ -427,9 +455,11 @@ spec:
         # Verify
         echo ""
         echo "=== Referrer tree ==="
-        oras discover --plain-http "${IMAGE_REF}"
+        ORAS_OPTS=""
+        [ "${INSECURE:-false}" = "true" ] && ORAS_OPTS="--plain-http"
+        oras discover ${ORAS_OPTS} "${IMAGE_REF}"
 
-        COUNT=$(oras discover --plain-http --format json "${IMAGE_REF}" | grep -c '"artifactType"')
+        COUNT=$(oras discover ${ORAS_OPTS} --format json "${IMAGE_REF}" | grep -c '"artifactType"')
         echo -n "${COUNT}" > $(results.referrer-count.path)
 
         echo ""

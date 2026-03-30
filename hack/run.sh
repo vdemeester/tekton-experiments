@@ -78,11 +78,13 @@ fi
 if [[ "${REGISTRY}" == "local" ]]; then
     IMAGE_REGISTRY="tekton-registry:5000/tekton-experiments"
     ARTIFACT_STORE="tekton-registry:5000/tekton-experiments/artifacts"
-    log "Using local registry (tekton-registry:5000)"
+    INSECURE="true"
+    log "Using local registry (tekton-registry:5000, plain HTTP)"
 else
     IMAGE_REGISTRY="${REGISTRY}/tekton-experiments"
     ARTIFACT_STORE="${REGISTRY}/tekton-experiments/artifacts"
-    log "Using external registry: ${REGISTRY}"
+    INSECURE="false"
+    log "Using external registry: ${REGISTRY} (HTTPS)"
 fi
 
 PIPELINERUN=$(cat <<EOF
@@ -104,6 +106,8 @@ spec:
       value: ${ARTIFACT_STORE}
     - name: version-tag
       value: latest
+    - name: insecure
+      value: "${INSECURE}"
 EOF
 )
 
