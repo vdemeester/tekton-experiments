@@ -17,7 +17,7 @@ Every friction point discovered in the PoC experiments disappears:
 | `attach-artifacts` / `bundle-artifacts` Task | Controller handles grouping + referrers | Entire task gone |
 | Chains `IMAGE_URL`/`IMAGE_DIGEST` type hinting | Controller provides artifact metadata to Chains | ~4 lines/task |
 | Artifact URI plumbing (params/results chain) | `from: tasks.X.outputs.Y` binding | ~10 lines/pipeline |
-| `--plain-http` / registry config in scripts | `config-artifact-storage` ConfigMap | Per-cluster, once |
+| `insecure` param threading through all layers | `config-artifact-storage` ConfigMap | Per-cluster, once |
 | `hack/setup.sh` registry setup | Operator configures storage backend | Per-cluster, once |
 
 **Total: ~60% fewer lines of YAML for the same pipeline.**
@@ -31,6 +31,7 @@ The `build-artifact-referrers` experiment rewritten.
 - Steps just write files to `$(outputs.name.path)` — Tekton handles the rest
 - Pipeline binds artifacts with `from: tasks.X.outputs.Y`
 - No StepActions, no oras, no export steps, no attach task
+- Chains integration is automatic (no `IMAGE_URL`/`IMAGE_DIGEST` type hinting)
 
 ### 2. Binary tarball build → [02-binary-build.yaml](02-binary-build.yaml)
 
@@ -70,6 +71,7 @@ spec:
   params:
     - name: source-artifact          # manual URI passing
     - name: artifact-store           # manual registry config
+    - name: insecure                 # manual registry mode
     - name: packages
     - name: go-version
   results:

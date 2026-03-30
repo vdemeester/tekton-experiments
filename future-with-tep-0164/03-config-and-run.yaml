@@ -55,12 +55,14 @@ spec:
   # That's it. No workspaces. No artifact-store. No bundle-registry.
   # The controller reads config-artifact-storage and handles everything.
   #
-  # After completion:
-  #   oras discover ghcr.io/vdemeester/tekton-experiments:v1.0.0
-  #   ├── application/vnd.tekton.artifact.images.v1+json   (from build-image)
-  #   ├── application/vnd.tekton.artifact.junit.v1+xml     (from run-tests)
-  #   ├── application/vnd.tekton.artifact.coverage.v1      (from run-tests)
-  #   └── in-toto attestation                              (from Tekton Chains)
+  # After completion, cosign tree shows the full supply chain:
+  #   cosign tree ghcr.io/vdemeester/tekton-experiments:v1.0.0
+  #   ├── 🔐 Attestations (Tekton Chains SLSA provenance)
+  #   ├── 🔐 Signatures (Tekton Chains cosign)
+  #   ├── 🔐 SBOMs (ko-generated or syft)
+  #   ├── 📦 images-manifest.json (from build-image)
+  #   ├── 📦 junit-results.xml (from run-tests)
+  #   └── 📦 coverage.out (from run-tests)
 ---
 # PipelineRun for the binary tarball build.
 # Exactly the same simplicity — only the pipeline name differs.
