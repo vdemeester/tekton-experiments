@@ -20,29 +20,7 @@ export KUBECONFIG=/tmp/tekton-experiments.kubeconfig
 
 ## Experiments
 
-### [`build-artifact-bundle`](build-artifact-bundle/) — Layers approach
-
-All build outputs bundled into a **single multi-layer OCI manifest**.
-One address, one pull gets everything.
-
-```
-registry/bundle:latest
-├── Layer: images-manifest.json
-├── Layer: junit-results.xml
-└── Layer: coverage.out
-```
-
-```bash
-kubectl apply -f build-artifact-bundle/01-tasks.yaml
-kubectl apply -f build-artifact-bundle/02-pipeline.yaml
-kubectl create -f build-artifact-bundle/run.yaml
-
-# Inspect
-oras manifest fetch --plain-http localhost:5555/tekton-experiments/bundle:latest | jq
-oras pull --plain-http localhost:5555/tekton-experiments/bundle:latest
-```
-
-### [`build-artifact-referrers`](build-artifact-referrers/) — Referrers approach
+### [`build-artifact-referrers`](build-artifact-referrers/) — Referrers approach ⭐
 
 Each build artifact attached as an **OCI referrer** to the built
 container image, using the OCI 1.1 `subject` field. Same mechanism
@@ -87,16 +65,15 @@ kubectl create -f build-artifact-referrers-noimage/run.yaml
 oras discover --plain-http localhost:5555/tekton-experiments/bin:latest
 ```
 
-### Comparison
+### ~~[`build-artifact-bundle`](build-artifact-bundle/) — Layers approach~~ (superseded)
 
-| | **Layers** | **Referrers** |
-|---|---|---|
-| Model | One manifest, multiple layers | Multiple manifests linked via `subject` |
-| Address | Separate tag (`bundle:latest`) | The built image itself |
-| Discovery | `oras manifest fetch` → layers array | `oras discover` → referrer tree |
-| Pull one artifact | `oras pull --include "file"` | `oras pull <referrer-digest>` |
-| Ecosystem fit | Custom convention | Native (cosign, SBOM, Chains) |
-| History | One snapshot per tag | Referrers accumulate per image digest |
+> **Superseded by the referrers approach.** Kept for reference only.
+>
+> Bundles all outputs as layers in a single OCI manifest. While simpler
+> conceptually, it creates a parallel artifact outside the OCI supply
+> chain graph. The referrers approach is superior because it uses the
+> same mechanism as cosign signatures, SBOMs, and SLSA attestations —
+> no separate convention needed.
 
 ### [`future-with-tep-0164`](future-with-tep-0164/) — What it looks like with TEP-0164
 
