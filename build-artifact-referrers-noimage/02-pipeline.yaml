@@ -1,0 +1,95 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-artifact-referrers-noimage
+spec:
+  description: |
+    Builds a Go binary tarball (NOT a container image), runs tests, and
+    attaches test results as OCI referrers to the binary artifact.
+
+    Proves that the referrers pattern works for ANY build output —
+    RPMs, JARs, tarballs, Helm charts, WASM modules — not just
+    container images.
+
+    Flow:
+      git-clone → build-binary + run-tests (parallel) → attach-artifacts
+                   (oras push tarball)                    (oras attach)
+
+    Result:
+      oras discover registry/bin:v1
+      ├── application/vnd.tekton.artifact.junit.v1+xml
+      └── application/vnd.tekton.artifact.coverage.v1
+  params:
+    - name: git-url
+      default: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      default: main
+    - name: binary-registry
+      description: OCI repository for the binary artifact
+      default: tekton-registry:5000/tekton-experiments/bin
+    - name: artifact-store
+      default: tekton-registry:5000/tekton-experiments/artifacts
+    - name: version-tag
+      default: latest
+  results:
+    - name: binary-ref
+      description: OCI reference for the binary artifact
+      value: $(tasks.build-binary.results.binary-ref)
+    - name: tests-passed
+      value: $(tasks.run-tests.results.tests-passed)
+    - name: coverage
+      value: $(tasks.run-tests.results.coverage-pct)
+    - name: referrer-count
+      value: $(tasks.attach.results.referrer-count)
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone-oci
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    - name: build-binary
+      runAfter: [git-clone]
+      taskRef:
+        name: build-binary
+      params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
+        - name: binary-registry
+          value: $(params.binary-registry)
+        - name: version-tag
+          value: $(params.version-tag)
+
+    - name: run-tests
+      runAfter: [git-clone]
+      taskRef:
+        name: run-tests-local
+      params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
+        - name: packages
+          value: "./..."
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    - name: attach
+      runAfter: [build-binary, run-tests]
+      taskRef:
+        name: attach-artifacts-to-binary
+      params:
+        - name: binary-ref
+          value: $(tasks.build-binary.results.binary-ref)
+        - name: junit-artifact
+          value: $(tasks.run-tests.results.junit-artifact)
+        - name: coverage-artifact
+          value: $(tasks.run-tests.results.coverage-artifact)
+        - name: pipelinerun-name
+          value: $(context.pipelineRun.name)
+        - name: git-sha
+          value: $(tasks.git-clone.results.commit)

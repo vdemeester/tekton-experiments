@@ -66,6 +66,27 @@ kubectl create -f build-artifact-referrers/run.yaml
 oras discover --plain-http localhost:5555/tekton-experiments:latest
 ```
 
+### [`build-artifact-referrers-noimage`](build-artifact-referrers-noimage/) — Referrers for non-container artifacts
+
+Same referrers pattern, but the build output is a **Go binary tarball**
+(not a container image). Proves OCI referrers work for RPMs, JARs,
+Helm charts — anything pushable to an OCI registry.
+
+```
+binary-tarball@sha256:25a1...     ← a .tar.gz, not an image
+├── referrer: junit-results.xml
+└── referrer: coverage.out
+```
+
+```bash
+kubectl apply -f build-artifact-referrers-noimage/01-tasks.yaml
+kubectl apply -f build-artifact-referrers-noimage/02-pipeline.yaml
+kubectl create -f build-artifact-referrers-noimage/run.yaml
+
+# Discover referrers on a tarball
+oras discover --plain-http localhost:5555/tekton-experiments/bin:latest
+```
+
 ### Comparison
 
 | | **Layers** | **Referrers** |
