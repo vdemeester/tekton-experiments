@@ -1,0 +1,132 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-artifact-bundle
+spec:
+  description: |
+    Builds, tests, and bundles all outputs into a single OCI artifact.
+
+    This Pipeline demonstrates the "OCI Build Artifact Bundle" concept:
+    every output (images, test results, coverage) from a PipelineRun
+    is collected into one OCI artifact, addressable by a single
+    registry reference.
+
+    Today this requires manual wiring (workspaces, oras step).
+    TEP-0164 aims to make this automatic and declarative.
+  params:
+    - name: git-url
+      description: Git repository URL
+      default: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      description: Git revision to build
+      default: main
+    - name: image-registry
+      description: Registry for built images
+      default: ghcr.io/vdemeester/tekton-experiments
+    - name: artifact-registry
+      description: Registry for the artifact bundle
+      default: ghcr.io/vdemeester/tekton-experiments/artifacts
+    - name: version-tag
+      description: Version tag for images and artifact bundle
+      default: latest
+  workspaces:
+    - name: source
+      description: Workspace for source code (shared across tasks)
+    - name: artifacts
+      description: Workspace for artifact files (collected by bundle task)
+    - name: docker-config
+      description: Docker config.json for registry authentication
+      optional: true
+  results:
+    - name: image-ref
+      description: Built image reference
+      value: $(tasks.build-image.results.image-ref)
+    - name: tests-passed
+      description: Whether tests passed
+      value: $(tasks.run-tests.results.tests-passed)
+    - name: coverage
+      description: Test coverage percentage
+      value: $(tasks.run-tests.results.coverage-pct)
+    - name: bundle-ref
+      description: OCI artifact bundle reference
+      value: $(tasks.bundle.results.bundle-ref)
+    - name: bundle-digest
+      description: OCI artifact bundle digest
+      value: $(tasks.bundle.results.bundle-digest)
+  tasks:
+    # Step 1: Clone source code
+    - name: git-clone
+      taskRef:
+        resolver: bundles
+        params:
+          - name: bundle
+            value: ghcr.io/tektoncd/catalog/upstream/tasks/git-clone:0.7
+          - name: name
+            value: git-clone
+          - name: kind
+            value: task
+      workspaces:
+        - name: output
+          workspace: source
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+
+    # Step 2a: Build container image (parallel with tests)
+    - name: build-image
+      runAfter: [git-clone]
+      taskRef:
+        name: build-image
+      workspaces:
+        - name: source
+          workspace: source
+        - name: artifacts
+          workspace: artifacts
+        - name: docker-config
+          workspace: docker-config
+      params:
+        - name: package
+          value: github.com/vdemeester/tekton-experiments
+        - name: image-registry
+          value: $(params.image-registry)
+        - name: image-tag
+          value: $(params.version-tag)
+
+    # Step 2b: Run tests with JUnit + coverage (parallel with build)
+    - name: run-tests
+      runAfter: [git-clone]
+      taskRef:
+        name: run-tests
+      workspaces:
+        - name: source
+          workspace: source
+        - name: artifacts
+          workspace: artifacts
+      params:
+        - name: packages
+          value: "./..."
+
+    # Step 3: Bundle all artifacts into single OCI artifact
+    - name: bundle
+      runAfter: [build-image, run-tests]
+      taskRef:
+        name: bundle-artifacts
+      workspaces:
+        - name: artifacts
+          workspace: artifacts
+        - name: docker-config
+          workspace: docker-config
+      params:
+        - name: registry
+          value: $(params.artifact-registry)
+        - name: tag
+          value: $(params.version-tag)
+        - name: pipelinerun-name
+          value: $(context.pipelineRun.name)
+        - name: git-sha
+          value: $(tasks.git-clone.results.commit)
+        - name: git-url
+          value: $(params.git-url)

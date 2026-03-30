@@ -1,0 +1,287 @@
+---
+# Task: build-image
+# Builds a container image using ko and records the image reference.
+# Writes images-manifest.json to the artifacts workspace.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-image
+spec:
+  params:
+    - name: package
+      description: Go package to build
+      default: github.com/vdemeester/tekton-experiments
+    - name: image-registry
+      description: Target image registry (e.g. ghcr.io/vdemeester/tekton-experiments)
+    - name: image-tag
+      description: Tag for the built image
+      default: latest
+  workspaces:
+    - name: source
+      description: Source code
+    - name: artifacts
+      description: Output artifacts
+    - name: docker-config
+      description: Docker config for registry auth
+      optional: true
+  results:
+    - name: image-ref
+      description: Full image reference with digest
+  steps:
+    - name: build
+      image: ghcr.io/ko-build/ko:latest
+      env:
+        - name: KO_DOCKER_REPO
+          value: $(params.image-registry)
+        - name: GOFLAGS
+          value: ""
+      script: |
+        #!/bin/sh
+        set -ex
+
+        # Setup docker auth if provided
+        if [ -d "$(workspaces.docker-config.path)" ] && [ -f "$(workspaces.docker-config.path)/config.json" ]; then
+          mkdir -p ~/.docker
+          cp $(workspaces.docker-config.path)/config.json ~/.docker/config.json
+        fi
+
+        cd $(workspaces.source.path)
+
+        # Build and push with ko
+        IMAGE_REF=$(ko build ./ \
+          --platform=linux/amd64 \
+          -t $(params.image-tag) \
+          --bare)
+
+        echo "Built image: ${IMAGE_REF}"
+        echo -n "${IMAGE_REF}" > $(results.image-ref.path)
+
+        # Write images manifest as artifact
+        # This is the kind of data that today overflows results (4KB limit)
+        cat > $(workspaces.artifacts.path)/images-manifest.json <<EOF
+        {
+          "images": [
+            {
+              "name": "tekton-experiments",
+              "uri": "${IMAGE_REF}",
+              "digest": "$(echo ${IMAGE_REF} | cut -d@ -f2)",
+              "platform": "linux/amd64",
+              "buildTool": "ko",
+              "buildOutput": true
+            }
+          ],
+          "registry": "$(params.image-registry)",
+          "tag": "$(params.image-tag)"
+        }
+        EOF
+---
+# Task: run-tests
+# Runs Go tests with JUnit output and coverage, writes to artifacts workspace.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-tests
+spec:
+  params:
+    - name: packages
+      description: Go packages to test
+      default: "./..."
+    - name: go-version
+      description: Go image tag
+      default: "1.24"
+  workspaces:
+    - name: source
+      description: Source code
+    - name: artifacts
+      description: Output artifacts (test results + coverage)
+  results:
+    - name: tests-passed
+      description: Whether all tests passed (true/false)
+    - name: coverage-pct
+      description: Test coverage percentage
+  steps:
+    - name: test
+      image: docker.io/library/golang:$(params.go-version)
+      script: |
+        #!/bin/bash
+        set -x
+
+        cd $(workspaces.source.path)
+
+        # Install gotestsum for JUnit output
+        go install gotest.tools/gotestsum@latest
+
+        # Run tests with JUnit output and coverage
+        PASSED=true
+        gotestsum \
+          --junitfile $(workspaces.artifacts.path)/junit-results.xml \
+          --format testdox \
+          -- \
+          -coverprofile=$(workspaces.artifacts.path)/coverage.out \
+          -covermode=atomic \
+          -count=1 \
+          $(params.packages) || PASSED=false
+
+        # Extract coverage percentage
+        if [ -f $(workspaces.artifacts.path)/coverage.out ]; then
+          COV=$(go tool cover -func=$(workspaces.artifacts.path)/coverage.out | tail -1 | awk '{print $3}')
+          echo -n "${COV}" > $(results.coverage-pct.path)
+        else
+          echo -n "0%" > $(results.coverage-pct.path)
+        fi
+
+        echo -n "${PASSED}" > $(results.tests-passed.path)
+
+        if [ "${PASSED}" = "false" ]; then
+          echo "Tests failed!"
+          exit 1
+        fi
+---
+# Task: bundle-artifacts
+# Collects all artifact files from the workspace and pushes them as a
+# single OCI artifact using oras. This is the heart of the PoC.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: bundle-artifacts
+spec:
+  params:
+    - name: registry
+      description: OCI registry for the artifact bundle
+    - name: tag
+      description: Tag for the artifact bundle
+      default: latest
+    - name: pipelinerun-name
+      description: Name of the parent PipelineRun
+      default: "unknown"
+    - name: git-sha
+      description: Git commit SHA
+      default: "unknown"
+    - name: git-url
+      description: Git repository URL
+      default: ""
+  workspaces:
+    - name: artifacts
+      description: Workspace containing all artifact files to bundle
+    - name: docker-config
+      description: Docker config for registry auth
+      optional: true
+  results:
+    - name: bundle-ref
+      description: Full OCI reference of the pushed bundle
+    - name: bundle-digest
+      description: Digest of the pushed bundle
+  steps:
+    - name: list-artifacts
+      image: docker.io/library/alpine:3.20
+      script: |
+        #!/bin/sh
+        echo "=== Artifacts to bundle ==="
+        ls -la $(workspaces.artifacts.path)/
+        echo ""
+        echo "=== File sizes ==="
+        du -sh $(workspaces.artifacts.path)/*
+        echo ""
+        echo "=== File count ==="
+        find $(workspaces.artifacts.path) -type f | wc -l
+
+    - name: push-bundle
+      image: ghcr.io/oras-project/oras:v1.2.2
+      env:
+        - name: REGISTRY
+          value: $(params.registry)
+        - name: TAG
+          value: $(params.tag)
+        - name: PIPELINERUN
+          value: $(params.pipelinerun-name)
+        - name: GIT_SHA
+          value: $(params.git-sha)
+        - name: GIT_URL
+          value: $(params.git-url)
+      script: |
+        #!/bin/sh
+        set -ex
+        cd $(workspaces.artifacts.path)
+
+        # Setup docker auth if provided
+        if [ -d "$(workspaces.docker-config.path)" ] && [ -f "$(workspaces.docker-config.path)/config.json" ]; then
+          mkdir -p ~/.docker
+          cp $(workspaces.docker-config.path)/config.json ~/.docker/config.json
+        fi
+
+        # Create config blob with PipelineRun metadata
+        cat > /tmp/config.json <<EOF
+        {
+          "pipelinerun": "${PIPELINERUN}",
+          "git": {
+            "sha": "${GIT_SHA}",
+            "url": "${GIT_URL}"
+          },
+          "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "description": "Build artifact bundle — all outputs from a single PipelineRun"
+        }
+        EOF
+
+        # Build the oras push command dynamically based on available files
+        PUSH_ARGS=""
+
+        # Images manifest (build output)
+        if [ -f images-manifest.json ]; then
+          PUSH_ARGS="${PUSH_ARGS} images-manifest.json:application/vnd.tekton.artifact.images.v1+json"
+        fi
+
+        # JUnit test results
+        if [ -f junit-results.xml ]; then
+          PUSH_ARGS="${PUSH_ARGS} junit-results.xml:application/vnd.tekton.artifact.junit.v1+xml"
+        fi
+
+        # Coverage report
+        if [ -f coverage.out ]; then
+          PUSH_ARGS="${PUSH_ARGS} coverage.out:application/vnd.tekton.artifact.coverage.v1"
+        fi
+
+        # Catch any other files not explicitly typed
+        for f in $(find . -maxdepth 1 -type f \
+            ! -name 'images-manifest.json' \
+            ! -name 'junit-results.xml' \
+            ! -name 'coverage.out' \
+            ! -name '.*'); do
+          fname=$(basename "$f")
+          PUSH_ARGS="${PUSH_ARGS} ${fname}:application/octet-stream"
+        done
+
+        if [ -z "${PUSH_ARGS}" ]; then
+          echo "ERROR: No artifact files found to bundle!"
+          exit 1
+        fi
+
+        echo "=== Pushing bundle ==="
+        echo "Registry: ${REGISTRY}:${TAG}"
+        echo "Files: ${PUSH_ARGS}"
+
+        FULL_REF="${REGISTRY}:${TAG}"
+
+        oras push "${FULL_REF}" \
+          --config /tmp/config.json:application/vnd.tekton.build-artifact.v1+json \
+          --annotation "dev.tekton.artifact/pipelinerun=${PIPELINERUN}" \
+          --annotation "dev.tekton.artifact/git-sha=${GIT_SHA}" \
+          --annotation "dev.tekton.artifact/git-url=${GIT_URL}" \
+          --annotation "dev.tekton.artifact/created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --annotation "org.opencontainers.image.source=${GIT_URL}" \
+          ${PUSH_ARGS}
+
+        # Get the digest of the pushed manifest
+        DIGEST=$(oras manifest fetch "${FULL_REF}" --descriptor | grep -o '"sha256:[^"]*"' | tr -d '"')
+
+        echo -n "${FULL_REF}" > $(results.bundle-ref.path)
+        echo -n "${DIGEST}" > $(results.bundle-digest.path)
+
+        echo ""
+        echo "=== Bundle pushed ==="
+        echo "Reference: ${FULL_REF}"
+        echo "Digest: ${DIGEST}"
+        echo ""
+        echo "=== Inspect with ==="
+        echo "oras manifest fetch ${FULL_REF} | jq"
+        echo "oras pull ${FULL_REF}"
+        echo "oras pull ${FULL_REF} --include 'junit-results.xml'"

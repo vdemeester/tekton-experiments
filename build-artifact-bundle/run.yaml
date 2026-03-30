@@ -1,0 +1,53 @@
+---
+# Example PipelineRun — adjust registry and credentials for your cluster.
+#
+# Prerequisites:
+#   kubectl apply -f build-artifact-bundle/01-tasks.yaml
+#   kubectl apply -f build-artifact-bundle/02-pipeline.yaml
+#
+# For GHCR auth, create a secret:
+#   kubectl create secret generic ghcr-docker-config \
+#     --from-file=config.json=$HOME/.docker/config.json
+#
+# For ttl.sh (no auth needed, images expire after 1h):
+#   Change image-registry and artifact-registry to ttl.sh/tekton-experiments-$RANDOM
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: build-artifact-bundle-
+spec:
+  pipelineRef:
+    name: build-artifact-bundle
+  params:
+    - name: git-url
+      value: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      value: main
+    # Use ttl.sh for quick testing (no auth required, 1h expiry)
+    - name: image-registry
+      value: ttl.sh/tekton-experiments
+    - name: artifact-registry
+      value: ttl.sh/tekton-experiments/artifacts
+    - name: version-tag
+      value: latest
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+    - name: artifacts
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 256Mi
+    # Uncomment for authenticated registries:
+    # - name: docker-config
+    #   secret:
+    #     secretName: ghcr-docker-config
