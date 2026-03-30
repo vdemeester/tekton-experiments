@@ -9,6 +9,10 @@ with test results and coverage attached as referrers.
 This applies to RPMs, JARs, Helm charts, WASM modules, ML models —
 anything you can push to an OCI registry.
 
+Tekton Chains is configured alongside — it signs TaskRuns and
+PipelineRuns, pushing SLSA attestations to the OCI registry when
+using an external registry (ghcr.io, quay.io).
+
 ## Architecture
 
 ```
@@ -80,6 +84,19 @@ localhost:5555/tekton-experiments/bin@sha256:25a17b58...
             └── dev.tekton.artifact/task: run-tests
 ```
 
+## Chains integration
+
+Tekton Chains is installed and configured by `hack/setup.sh`:
+- Generates cosign key pair for signing
+- Stores SLSA provenance attestations in OCI (alongside artifacts)
+- With external registries (ghcr.io), attestations appear as
+  cosign-style tag attachments on the built artifacts
+
+Note: Chains' OCI attestation push requires HTTPS registries. With
+the local registry, Chains signs but stores attestations in TaskRun
+annotations only. Use `./hack/setup.sh --registry ghcr.io/user` for
+full Chains integration.
+
 ## Pull the binary
 
 ```bash
@@ -95,6 +112,15 @@ tar -tzf tekton-experiments-latest.tar.gz
 DIGEST=$(oras discover --format json registry/bin:latest | \
   jq -r '.referrers[] | select(.artifactType | contains("junit")) | .digest')
 oras pull "registry/bin@${DIGEST}"
+```
+
+## Run
+
+```bash
+./hack/run.sh --noimage
+
+# With external registry (Chains attestations work fully)
+./hack/run.sh --noimage --registry ghcr.io/vdemeester
 ```
 
 ## Implications for TEP-0164

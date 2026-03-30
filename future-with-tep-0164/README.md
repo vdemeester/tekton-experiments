@@ -15,6 +15,7 @@ Every friction point discovered in the PoC experiments disappears:
 | `use-oci-artifact` StepAction (oras pull) | Init container downloads + verifies | ~30 lines/task |
 | Export step (StepAction result → Task result) | Controller promotes artifact results | ~8 lines/task |
 | `attach-artifacts` / `bundle-artifacts` Task | Controller handles grouping + referrers | Entire task gone |
+| Chains `IMAGE_URL`/`IMAGE_DIGEST` type hinting | Controller provides artifact metadata to Chains | ~4 lines/task |
 | Artifact URI plumbing (params/results chain) | `from: tasks.X.outputs.Y` binding | ~10 lines/pipeline |
 | `--plain-http` / registry config in scripts | `config-artifact-storage` ConfigMap | Per-cluster, once |
 | `hack/setup.sh` registry setup | Operator configures storage backend | Per-cluster, once |
@@ -43,6 +44,17 @@ The `build-artifact-referrers-noimage` experiment rewritten.
 The cluster-level configuration and PipelineRun that ties it together.
 - `config-artifact-storage` ConfigMap configures OCI backend once
 - PipelineRun has zero artifact boilerplate — just params
+
+### Chains integration
+
+With TEP-0164, Chains integration becomes seamless:
+- Artifacts with `buildOutput: true` are automatically recognized by Chains as SLSA subjects
+- No `IMAGE_URL`/`IMAGE_DIGEST` type hinting needed — the controller provides artifact metadata
+- Chains attestations, cosign signatures, and build artifacts all appear as OCI referrers
+- The full supply chain graph is visible via `cosign tree` or `oras discover`
+
+Today's PoC already demonstrates this on ghcr.io (see `build-artifact-referrers/`),
+but TEP-0164 eliminates the manual plumbing required to make it work.
 
 ## Side-by-side: today vs TEP-0164
 

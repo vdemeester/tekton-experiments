@@ -130,6 +130,16 @@ oras manifest fetch registry/bundle:latest | \
   jq '.layers[] | {file: .annotations["org.opencontainers.image.title"], digest, mediaType}'
 ```
 
+## Note on Chains
+
+This experiment predates the Chains integration added later. Tekton
+Chains is installed by `hack/setup.sh` and signs all TaskRuns, but
+the bundle approach doesn't integrate with Chains' attestation model
+as naturally as the referrers approach does. With referrers, Chains
+attestations and build artifacts live in the same OCI supply chain
+graph. This is one reason this approach was **superseded** — see
+[`build-artifact-referrers/`](../build-artifact-referrers/).
+
 ## What this shows for TEP-0164
 
 | Today (this PoC)                                   | With TEP-0164                                |
