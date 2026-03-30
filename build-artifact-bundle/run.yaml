@@ -1,16 +1,12 @@
 ---
-# Example PipelineRun — adjust registry and credentials for your cluster.
+# Example PipelineRun — uses local registry, no PVCs, no auth needed.
 #
 # Prerequisites:
+#   ./hack/setup.sh
+#   export KUBECONFIG=/tmp/tekton-experiments.kubeconfig
 #   kubectl apply -f build-artifact-bundle/01-tasks.yaml
 #   kubectl apply -f build-artifact-bundle/02-pipeline.yaml
-#
-# For GHCR auth, create a secret:
-#   kubectl create secret generic ghcr-docker-config \
-#     --from-file=config.json=$HOME/.docker/config.json
-#
-# For ttl.sh (no auth needed, images expire after 1h):
-#   Change image-registry and artifact-registry to ttl.sh/tekton-experiments-$RANDOM
+#   kubectl create -f build-artifact-bundle/run.yaml
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
@@ -23,31 +19,13 @@ spec:
       value: https://github.com/vdemeester/tekton-experiments
     - name: git-revision
       value: main
-    # Use ttl.sh for quick testing (no auth required, 1h expiry)
+    # Local registry — no auth, accessible from both host and cluster
     - name: image-registry
-      value: ttl.sh/tekton-experiments
-    - name: artifact-registry
-      value: ttl.sh/tekton-experiments/artifacts
+      value: tekton-registry:5000/tekton-experiments
+    - name: artifact-store
+      value: tekton-registry:5000/tekton-experiments/artifacts
+    - name: bundle-registry
+      value: tekton-registry:5000/tekton-experiments/bundle
     - name: version-tag
       value: latest
-  workspaces:
-    - name: source
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: 1Gi
-    - name: artifacts
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: 256Mi
-    # Uncomment for authenticated registries:
-    # - name: docker-config
-    #   secret:
-    #     secretName: ghcr-docker-config
+  # No workspaces! All data flows through OCI artifacts.

@@ -1,64 +1,216 @@
 ---
+# StepAction: create-oci-artifact
+# Tars a directory and pushes it as an OCI blob to a registry.
+# Outputs the artifact URI as oci:<repo>@sha256:<digest>.
+#
+# Simplified version of konflux-ci/build-trusted-artifacts' create-oci.sh.
+apiVersion: tekton.dev/v1alpha1
+kind: StepAction
+metadata:
+  name: create-oci-artifact
+spec:
+  params:
+    - name: store
+      description: OCI repository to push to (e.g. ttl.sh/my-artifacts)
+    - name: name
+      description: Artifact name (used as layer filename)
+    - name: path
+      description: Path to the file or directory to archive and push
+  results:
+    - name: uri
+      description: "OCI artifact URI: oci:<repo>@sha256:<digest>"
+  image: ghcr.io/oras-project/oras:v1.2.2
+  env:
+    - name: STORE
+      value: $(params.store)
+    - name: ARTIFACT_NAME
+      value: $(params.name)
+    - name: ARTIFACT_PATH
+      value: $(params.path)
+  script: |
+    #!/bin/sh
+    set -ex
+
+    ARCHIVE_DIR=$(mktemp -d)
+    ARCHIVE="${ARCHIVE_DIR}/${ARTIFACT_NAME}"
+
+    # Create tar archive
+    if [ -d "${ARTIFACT_PATH}" ]; then
+      tar -czf "${ARCHIVE}" -C "${ARTIFACT_PATH}" .
+    elif [ -f "${ARTIFACT_PATH}" ]; then
+      tar -czf "${ARCHIVE}" -C "$(dirname ${ARTIFACT_PATH})" "$(basename ${ARTIFACT_PATH})"
+    else
+      echo "ERROR: ${ARTIFACT_PATH} does not exist"
+      exit 1
+    fi
+
+    DIGEST=$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)
+    echo "Artifact ${ARTIFACT_NAME}: sha256:${DIGEST}"
+
+    cd "${ARCHIVE_DIR}"
+    oras push --plain-http "${STORE}" "${ARTIFACT_NAME}"
+
+    echo -n "oci:${STORE}@sha256:${DIGEST}" > $(step.results.uri.path)
+    echo "Pushed: oci:${STORE}@sha256:${DIGEST}"
+---
+# StepAction: use-oci-artifact
+# Fetches an OCI blob by digest and extracts it to a directory.
+#
+# Simplified version of konflux-ci/build-trusted-artifacts' use-oci.sh.
+apiVersion: tekton.dev/v1alpha1
+kind: StepAction
+metadata:
+  name: use-oci-artifact
+spec:
+  params:
+    - name: uri
+      description: "OCI artifact URI: oci:<repo>@sha256:<digest>"
+    - name: path
+      description: Path to extract the artifact to
+  image: ghcr.io/oras-project/oras:v1.2.2
+  env:
+    - name: URI
+      value: $(params.uri)
+    - name: DEST
+      value: $(params.path)
+  script: |
+    #!/bin/sh
+    set -ex
+
+    # Parse oci:<repo>@sha256:<digest>
+    REF="${URI#oci:}"
+
+    mkdir -p "${DEST}"
+
+    # Fetch and extract
+    oras blob fetch --plain-http "${REF}" --output - | tar -xzf - -C "${DEST}"
+
+    echo "Restored artifact to ${DEST}"
+---
+# Task: git-clone-oci
+# Clones a repo and pushes the source as an OCI artifact.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone-oci
+spec:
+  params:
+    - name: url
+      description: Git repository URL
+    - name: revision
+      description: Git revision
+      default: main
+    - name: artifact-store
+      description: OCI repository for artifact storage
+  results:
+    - name: commit
+      description: Git commit SHA
+    - name: source-artifact
+      description: OCI URI for source artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: clone
+      image: cgr.dev/chainguard/git:latest
+      env:
+        - name: GIT_URL
+          value: $(params.url)
+        - name: GIT_REVISION
+          value: $(params.revision)
+      script: |
+        #!/bin/sh
+        set -ex
+        cd /var/workdir
+        git clone --depth 1 --branch "${GIT_REVISION}" "${GIT_URL}" source
+        cd source
+        echo -n "$(git rev-parse HEAD)" > $(results.commit.path)
+    - name: create-source-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: source
+        - name: path
+          value: /var/workdir/source
+    - name: export-source-artifact
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: SOURCE_URI
+          value: $(steps.create-source-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${SOURCE_URI}" > $(results.source-artifact.path)
+---
 # Task: build-image
-# Builds a container image using ko and records the image reference.
-# Writes images-manifest.json to the artifacts workspace.
+# Builds a container image using ko.
+# Fetches source from OCI, pushes image manifest as OCI artifact.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: build-image
 spec:
   params:
-    - name: package
-      description: Go package to build
-      default: github.com/vdemeester/tekton-experiments
+    - name: source-artifact
+      description: OCI URI for source artifact
     - name: image-registry
-      description: Target image registry (e.g. ghcr.io/vdemeester/tekton-experiments)
+      description: Target image registry
     - name: image-tag
       description: Tag for the built image
       default: latest
-  workspaces:
-    - name: source
-      description: Source code
-    - name: artifacts
-      description: Output artifacts
-    - name: docker-config
-      description: Docker config for registry auth
-      optional: true
+    - name: artifact-store
+      description: OCI repository for artifact storage
   results:
     - name: image-ref
       description: Full image reference with digest
+    - name: images-artifact
+      description: OCI URI for the images manifest artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
   steps:
+    - name: use-source
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.source-artifact)
+        - name: path
+          value: /var/workdir/source
     - name: build
       image: ghcr.io/ko-build/ko:latest
       env:
         - name: KO_DOCKER_REPO
           value: $(params.image-registry)
-        - name: GOFLAGS
-          value: ""
+        - name: IMAGE_TAG
+          value: $(params.image-tag)
       script: |
         #!/bin/sh
         set -ex
+        cd /var/workdir/source
 
-        # Setup docker auth if provided
-        if [ -d "$(workspaces.docker-config.path)" ] && [ -f "$(workspaces.docker-config.path)/config.json" ]; then
-          mkdir -p ~/.docker
-          cp $(workspaces.docker-config.path)/config.json ~/.docker/config.json
-        fi
-
-        cd $(workspaces.source.path)
-
-        # Build and push with ko
+        export GOFLAGS="-buildvcs=false"
         IMAGE_REF=$(ko build ./ \
           --platform=linux/amd64 \
-          -t $(params.image-tag) \
-          --bare)
+          -t "${IMAGE_TAG}" \
+          --bare \
+          --insecure-registry)
 
         echo "Built image: ${IMAGE_REF}"
         echo -n "${IMAGE_REF}" > $(results.image-ref.path)
 
-        # Write images manifest as artifact
-        # This is the kind of data that today overflows results (4KB limit)
-        cat > $(workspaces.artifacts.path)/images-manifest.json <<EOF
+        # Write images manifest for the bundle
+        cat > /var/workdir/images-manifest.json <<EOF
         {
           "images": [
             {
@@ -66,65 +218,98 @@ spec:
               "uri": "${IMAGE_REF}",
               "digest": "$(echo ${IMAGE_REF} | cut -d@ -f2)",
               "platform": "linux/amd64",
-              "buildTool": "ko",
               "buildOutput": true
             }
-          ],
-          "registry": "$(params.image-registry)",
-          "tag": "$(params.image-tag)"
+          ]
         }
         EOF
+    - name: create-images-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: images-manifest.json
+        - name: path
+          value: /var/workdir/images-manifest.json
+    - name: export-images-artifact
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: IMAGES_URI
+          value: $(steps.create-images-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${IMAGES_URI}" > $(results.images-artifact.path)
 ---
 # Task: run-tests
-# Runs Go tests with JUnit output and coverage, writes to artifacts workspace.
+# Runs Go tests with JUnit output and coverage.
+# Pushes results as OCI artifacts.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: run-tests
 spec:
   params:
+    - name: source-artifact
+      description: OCI URI for source artifact
     - name: packages
       description: Go packages to test
       default: "./..."
     - name: go-version
       description: Go image tag
-      default: "1.24"
-  workspaces:
-    - name: source
-      description: Source code
-    - name: artifacts
-      description: Output artifacts (test results + coverage)
+      default: "1.26"
+    - name: artifact-store
+      description: OCI repository for artifact storage
   results:
     - name: tests-passed
       description: Whether all tests passed (true/false)
     - name: coverage-pct
       description: Test coverage percentage
+    - name: junit-artifact
+      description: OCI URI for JUnit test results artifact
+    - name: coverage-artifact
+      description: OCI URI for coverage artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
   steps:
+    - name: use-source
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.source-artifact)
+        - name: path
+          value: /var/workdir/source
     - name: test
       image: docker.io/library/golang:$(params.go-version)
+      env:
+        - name: PACKAGES
+          value: $(params.packages)
       script: |
         #!/bin/bash
         set -x
+        cd /var/workdir/source
 
-        cd $(workspaces.source.path)
-
-        # Install gotestsum for JUnit output
         go install gotest.tools/gotestsum@latest
 
-        # Run tests with JUnit output and coverage
         PASSED=true
         gotestsum \
-          --junitfile $(workspaces.artifacts.path)/junit-results.xml \
+          --junitfile /var/workdir/junit-results.xml \
           --format testdox \
           -- \
-          -coverprofile=$(workspaces.artifacts.path)/coverage.out \
+          -coverprofile=/var/workdir/coverage.out \
           -covermode=atomic \
           -count=1 \
-          $(params.packages) || PASSED=false
+          ${PACKAGES} || PASSED=false
 
-        # Extract coverage percentage
-        if [ -f $(workspaces.artifacts.path)/coverage.out ]; then
-          COV=$(go tool cover -func=$(workspaces.artifacts.path)/coverage.out | tail -1 | awk '{print $3}')
+        if [ -f /var/workdir/coverage.out ]; then
+          COV=$(go tool cover -func=/var/workdir/coverage.out | tail -1 | awk '{print $3}')
           echo -n "${COV}" > $(results.coverage-pct.path)
         else
           echo -n "0%" > $(results.coverage-pct.path)
@@ -136,10 +321,41 @@ spec:
           echo "Tests failed!"
           exit 1
         fi
+    - name: create-junit-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: junit-results.xml
+        - name: path
+          value: /var/workdir/junit-results.xml
+    - name: create-coverage-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: coverage.out
+        - name: path
+          value: /var/workdir/coverage.out
+    - name: export-test-artifacts
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: JUNIT_URI
+          value: $(steps.create-junit-artifact.results.uri)
+        - name: COVERAGE_URI
+          value: $(steps.create-coverage-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${JUNIT_URI}" > $(results.junit-artifact.path)
+        echo -n "${COVERAGE_URI}" > $(results.coverage-artifact.path)
 ---
 # Task: bundle-artifacts
-# Collects all artifact files from the workspace and pushes them as a
-# single OCI artifact using oras. This is the heart of the PoC.
+# Fetches individual OCI artifacts and re-bundles them into a single
+# multi-layer OCI artifact — the "build artifact bundle".
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -147,44 +363,59 @@ metadata:
 spec:
   params:
     - name: registry
-      description: OCI registry for the artifact bundle
+      description: OCI registry for the final bundle
     - name: tag
       description: Tag for the artifact bundle
       default: latest
     - name: pipelinerun-name
-      description: Name of the parent PipelineRun
-      default: "unknown"
+      default: unknown
     - name: git-sha
-      description: Git commit SHA
-      default: "unknown"
+      default: unknown
     - name: git-url
-      description: Git repository URL
       default: ""
-  workspaces:
-    - name: artifacts
-      description: Workspace containing all artifact files to bundle
-    - name: docker-config
-      description: Docker config for registry auth
-      optional: true
+    - name: images-artifact
+      description: OCI URI for images manifest
+    - name: junit-artifact
+      description: OCI URI for JUnit results
+    - name: coverage-artifact
+      description: OCI URI for coverage report
   results:
     - name: bundle-ref
       description: Full OCI reference of the pushed bundle
     - name: bundle-digest
       description: Digest of the pushed bundle
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
   steps:
-    - name: list-artifacts
-      image: docker.io/library/alpine:3.20
-      script: |
-        #!/bin/sh
-        echo "=== Artifacts to bundle ==="
-        ls -la $(workspaces.artifacts.path)/
-        echo ""
-        echo "=== File sizes ==="
-        du -sh $(workspaces.artifacts.path)/*
-        echo ""
-        echo "=== File count ==="
-        find $(workspaces.artifacts.path) -type f | wc -l
-
+    - name: fetch-images
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.images-artifact)
+        - name: path
+          value: /var/workdir/images
+    - name: fetch-junit
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.junit-artifact)
+        - name: path
+          value: /var/workdir/junit
+    - name: fetch-coverage
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.coverage-artifact)
+        - name: path
+          value: /var/workdir/coverage
     - name: push-bundle
       image: ghcr.io/oras-project/oras:v1.2.2
       env:
@@ -201,77 +432,38 @@ spec:
       script: |
         #!/bin/sh
         set -ex
-        cd $(workspaces.artifacts.path)
 
-        # Setup docker auth if provided
-        if [ -d "$(workspaces.docker-config.path)" ] && [ -f "$(workspaces.docker-config.path)/config.json" ]; then
-          mkdir -p ~/.docker
-          cp $(workspaces.docker-config.path)/config.json ~/.docker/config.json
-        fi
+        cd /var/workdir
 
-        # Create config blob with PipelineRun metadata
-        cat > /tmp/config.json <<EOF
+        cat > config.json <<EOF
         {
           "pipelinerun": "${PIPELINERUN}",
-          "git": {
-            "sha": "${GIT_SHA}",
-            "url": "${GIT_URL}"
-          },
-          "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-          "description": "Build artifact bundle — all outputs from a single PipelineRun"
+          "git": {"sha": "${GIT_SHA}", "url": "${GIT_URL}"},
+          "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         }
         EOF
 
-        # Build the oras push command dynamically based on available files
-        PUSH_ARGS=""
+        # Assemble files from fetched artifacts
+        cp images/images-manifest.json .
+        cp junit/junit-results.xml .
+        cp coverage/coverage.out .
 
-        # Images manifest (build output)
-        if [ -f images-manifest.json ]; then
-          PUSH_ARGS="${PUSH_ARGS} images-manifest.json:application/vnd.tekton.artifact.images.v1+json"
-        fi
-
-        # JUnit test results
-        if [ -f junit-results.xml ]; then
-          PUSH_ARGS="${PUSH_ARGS} junit-results.xml:application/vnd.tekton.artifact.junit.v1+xml"
-        fi
-
-        # Coverage report
-        if [ -f coverage.out ]; then
-          PUSH_ARGS="${PUSH_ARGS} coverage.out:application/vnd.tekton.artifact.coverage.v1"
-        fi
-
-        # Catch any other files not explicitly typed
-        for f in $(find . -maxdepth 1 -type f \
-            ! -name 'images-manifest.json' \
-            ! -name 'junit-results.xml' \
-            ! -name 'coverage.out' \
-            ! -name '.*'); do
-          fname=$(basename "$f")
-          PUSH_ARGS="${PUSH_ARGS} ${fname}:application/octet-stream"
-        done
-
-        if [ -z "${PUSH_ARGS}" ]; then
-          echo "ERROR: No artifact files found to bundle!"
-          exit 1
-        fi
-
-        echo "=== Pushing bundle ==="
-        echo "Registry: ${REGISTRY}:${TAG}"
-        echo "Files: ${PUSH_ARGS}"
+        echo "=== Artifacts to bundle ==="
+        ls -la images-manifest.json junit-results.xml coverage.out
 
         FULL_REF="${REGISTRY}:${TAG}"
 
-        oras push "${FULL_REF}" \
-          --config /tmp/config.json:application/vnd.tekton.build-artifact.v1+json \
+        oras push --plain-http "${FULL_REF}" \
+          --config config.json:application/vnd.tekton.build-artifact.v1+json \
           --annotation "dev.tekton.artifact/pipelinerun=${PIPELINERUN}" \
           --annotation "dev.tekton.artifact/git-sha=${GIT_SHA}" \
           --annotation "dev.tekton.artifact/git-url=${GIT_URL}" \
           --annotation "dev.tekton.artifact/created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-          --annotation "org.opencontainers.image.source=${GIT_URL}" \
-          ${PUSH_ARGS}
+          images-manifest.json:application/vnd.tekton.artifact.images.v1+json \
+          junit-results.xml:application/vnd.tekton.artifact.junit.v1+xml \
+          coverage.out:application/vnd.tekton.artifact.coverage.v1
 
-        # Get the digest of the pushed manifest
-        DIGEST=$(oras manifest fetch "${FULL_REF}" --descriptor | grep -o '"sha256:[^"]*"' | tr -d '"')
+        DIGEST=$(oras manifest fetch --plain-http "${FULL_REF}" --descriptor | grep -o '"sha256:[^"]*"' | tr -d '"')
 
         echo -n "${FULL_REF}" > $(results.bundle-ref.path)
         echo -n "${DIGEST}" > $(results.bundle-digest.path)
@@ -281,7 +473,6 @@ spec:
         echo "Reference: ${FULL_REF}"
         echo "Digest: ${DIGEST}"
         echo ""
-        echo "=== Inspect with ==="
-        echo "oras manifest fetch ${FULL_REF} | jq"
-        echo "oras pull ${FULL_REF}"
-        echo "oras pull ${FULL_REF} --include 'junit-results.xml'"
+        echo "Inspect:  oras manifest fetch ${FULL_REF} | jq"
+        echo "Pull all: oras pull ${FULL_REF}"
+        echo "Pull one: oras pull ${FULL_REF} --include junit-results.xml"

@@ -7,13 +7,12 @@ spec:
   description: |
     Builds, tests, and bundles all outputs into a single OCI artifact.
 
-    This Pipeline demonstrates the "OCI Build Artifact Bundle" concept:
-    every output (images, test results, coverage) from a PipelineRun
-    is collected into one OCI artifact, addressable by a single
-    registry reference.
+    Uses OCI artifacts (not PVCs) for passing data between tasks:
+    - Source code is pushed to OCI after clone, pulled by build and test tasks
+    - Each task pushes its outputs as individual OCI artifacts
+    - A final task re-bundles everything into one multi-layer OCI artifact
 
-    Today this requires manual wiring (workspaces, oras step).
-    TEP-0164 aims to make this automatic and declarative.
+    This is the pattern TEP-0164 aims to automate and make declarative.
   params:
     - name: git-url
       description: Git repository URL
@@ -22,22 +21,17 @@ spec:
       description: Git revision to build
       default: main
     - name: image-registry
-      description: Registry for built images
-      default: ghcr.io/vdemeester/tekton-experiments
-    - name: artifact-registry
-      description: Registry for the artifact bundle
-      default: ghcr.io/vdemeester/tekton-experiments/artifacts
+      description: Registry for built container images
+      default: ttl.sh/tekton-experiments
+    - name: artifact-store
+      description: OCI repository for intermediate artifacts
+      default: ttl.sh/tekton-experiments-artifacts
+    - name: bundle-registry
+      description: Registry for the final artifact bundle
+      default: ttl.sh/tekton-experiments-bundle
     - name: version-tag
       description: Version tag for images and artifact bundle
       default: latest
-  workspaces:
-    - name: source
-      description: Workspace for source code (shared across tasks)
-    - name: artifacts
-      description: Workspace for artifact files (collected by bundle task)
-    - name: docker-config
-      description: Docker config.json for registry authentication
-      optional: true
   results:
     - name: image-ref
       description: Built image reference
@@ -54,74 +48,58 @@ spec:
     - name: bundle-digest
       description: OCI artifact bundle digest
       value: $(tasks.bundle.results.bundle-digest)
+  # NOTE: No shared workspace needed! All data flows through OCI artifacts.
+  # This is a key advantage — no PVC provisioning, no affinity constraints,
+  # tasks can run on different nodes.
   tasks:
-    # Step 1: Clone source code
+    # Step 1: Clone and push source as OCI artifact
     - name: git-clone
       taskRef:
-        resolver: bundles
-        params:
-          - name: bundle
-            value: ghcr.io/tektoncd/catalog/upstream/tasks/git-clone:0.7
-          - name: name
-            value: git-clone
-          - name: kind
-            value: task
-      workspaces:
-        - name: output
-          workspace: source
+        name: git-clone-oci
       params:
         - name: url
           value: $(params.git-url)
         - name: revision
           value: $(params.git-revision)
+        - name: artifact-store
+          value: $(params.artifact-store)
 
     # Step 2a: Build container image (parallel with tests)
     - name: build-image
       runAfter: [git-clone]
       taskRef:
         name: build-image
-      workspaces:
-        - name: source
-          workspace: source
-        - name: artifacts
-          workspace: artifacts
-        - name: docker-config
-          workspace: docker-config
       params:
-        - name: package
-          value: github.com/vdemeester/tekton-experiments
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
         - name: image-registry
           value: $(params.image-registry)
         - name: image-tag
           value: $(params.version-tag)
+        - name: artifact-store
+          value: $(params.artifact-store)
 
-    # Step 2b: Run tests with JUnit + coverage (parallel with build)
+    # Step 2b: Run tests (parallel with build)
     - name: run-tests
       runAfter: [git-clone]
       taskRef:
         name: run-tests
-      workspaces:
-        - name: source
-          workspace: source
-        - name: artifacts
-          workspace: artifacts
       params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
         - name: packages
           value: "./..."
+        - name: artifact-store
+          value: $(params.artifact-store)
 
-    # Step 3: Bundle all artifacts into single OCI artifact
+    # Step 3: Bundle all artifacts into one OCI artifact
     - name: bundle
       runAfter: [build-image, run-tests]
       taskRef:
         name: bundle-artifacts
-      workspaces:
-        - name: artifacts
-          workspace: artifacts
-        - name: docker-config
-          workspace: docker-config
       params:
         - name: registry
-          value: $(params.artifact-registry)
+          value: $(params.bundle-registry)
         - name: tag
           value: $(params.version-tag)
         - name: pipelinerun-name
@@ -130,3 +108,9 @@ spec:
           value: $(tasks.git-clone.results.commit)
         - name: git-url
           value: $(params.git-url)
+        - name: images-artifact
+          value: $(tasks.build-image.results.images-artifact)
+        - name: junit-artifact
+          value: $(tasks.run-tests.results.junit-artifact)
+        - name: coverage-artifact
+          value: $(tasks.run-tests.results.coverage-artifact)
