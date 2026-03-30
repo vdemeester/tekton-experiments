@@ -1,0 +1,100 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-artifact-referrers
+spec:
+  description: |
+    Builds, tests, and attaches all artifacts as OCI referrers to the built image.
+
+    Uses the OCI 1.1 referrers API (subject field) instead of bundling
+    artifacts into layers. Each artifact becomes a referrer discoverable
+    via `oras discover` — the same mechanism used by cosign signatures,
+    SBOMs, and SLSA attestations.
+
+    Flow:
+      git-clone → build + test (parallel) → attach-artifacts
+                                              (oras attach to built image)
+
+    Result:
+      oras discover <image>
+      ├── application/vnd.tekton.artifact.images.v1+json
+      ├── application/vnd.tekton.artifact.junit.v1+xml
+      └── application/vnd.tekton.artifact.coverage.v1
+  params:
+    - name: git-url
+      default: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      default: main
+    - name: image-registry
+      default: tekton-registry:5000/tekton-experiments
+    - name: artifact-store
+      default: tekton-registry:5000/tekton-experiments/artifacts
+    - name: version-tag
+      default: latest
+  results:
+    - name: image-ref
+      description: Built image reference
+      value: $(tasks.build-image.results.image-ref)
+    - name: tests-passed
+      value: $(tasks.run-tests.results.tests-passed)
+    - name: coverage
+      value: $(tasks.run-tests.results.coverage-pct)
+    - name: referrer-count
+      description: Number of referrers attached to the image
+      value: $(tasks.attach.results.referrer-count)
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone-oci
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    - name: build-image
+      runAfter: [git-clone]
+      taskRef:
+        name: build-image
+      params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
+        - name: image-registry
+          value: $(params.image-registry)
+        - name: image-tag
+          value: $(params.version-tag)
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    - name: run-tests
+      runAfter: [git-clone]
+      taskRef:
+        name: run-tests
+      params:
+        - name: source-artifact
+          value: $(tasks.git-clone.results.source-artifact)
+        - name: packages
+          value: "./..."
+        - name: artifact-store
+          value: $(params.artifact-store)
+
+    - name: attach
+      runAfter: [build-image, run-tests]
+      taskRef:
+        name: attach-artifacts
+      params:
+        - name: image-ref
+          value: $(tasks.build-image.results.image-ref)
+        - name: images-artifact
+          value: $(tasks.build-image.results.images-artifact)
+        - name: junit-artifact
+          value: $(tasks.run-tests.results.junit-artifact)
+        - name: coverage-artifact
+          value: $(tasks.run-tests.results.coverage-artifact)
+        - name: pipelinerun-name
+          value: $(context.pipelineRun.name)
+        - name: git-sha
+          value: $(tasks.git-clone.results.commit)

@@ -1,0 +1,432 @@
+---
+# StepAction: create-oci-artifact
+# Tars a directory/file and pushes it as an OCI blob to a registry.
+apiVersion: tekton.dev/v1alpha1
+kind: StepAction
+metadata:
+  name: create-oci-artifact
+spec:
+  params:
+    - name: store
+      description: OCI repository to push to
+    - name: name
+      description: Artifact name (used as layer filename)
+    - name: path
+      description: Path to the file or directory to archive and push
+  results:
+    - name: uri
+      description: "OCI artifact URI: oci:<repo>@sha256:<digest>"
+  image: ghcr.io/oras-project/oras:v1.2.2
+  env:
+    - name: STORE
+      value: $(params.store)
+    - name: ARTIFACT_NAME
+      value: $(params.name)
+    - name: ARTIFACT_PATH
+      value: $(params.path)
+  script: |
+    #!/bin/sh
+    set -ex
+    ARCHIVE_DIR=$(mktemp -d)
+    ARCHIVE="${ARCHIVE_DIR}/${ARTIFACT_NAME}"
+    if [ -d "${ARTIFACT_PATH}" ]; then
+      tar -czf "${ARCHIVE}" -C "${ARTIFACT_PATH}" .
+    elif [ -f "${ARTIFACT_PATH}" ]; then
+      tar -czf "${ARCHIVE}" -C "$(dirname ${ARTIFACT_PATH})" "$(basename ${ARTIFACT_PATH})"
+    else
+      echo "ERROR: ${ARTIFACT_PATH} does not exist"; exit 1
+    fi
+    DIGEST=$(sha256sum "${ARCHIVE}" | cut -d' ' -f1)
+    cd "${ARCHIVE_DIR}"
+    oras push --plain-http "${STORE}" "${ARTIFACT_NAME}"
+    echo -n "oci:${STORE}@sha256:${DIGEST}" > $(step.results.uri.path)
+    echo "Pushed artifact ${ARTIFACT_NAME}: sha256:${DIGEST}"
+---
+# StepAction: use-oci-artifact
+# Fetches an OCI blob by digest and extracts it to a directory.
+apiVersion: tekton.dev/v1alpha1
+kind: StepAction
+metadata:
+  name: use-oci-artifact
+spec:
+  params:
+    - name: uri
+      description: "OCI artifact URI: oci:<repo>@sha256:<digest>"
+    - name: path
+      description: Path to extract the artifact to
+  image: ghcr.io/oras-project/oras:v1.2.2
+  env:
+    - name: URI
+      value: $(params.uri)
+    - name: DEST
+      value: $(params.path)
+  script: |
+    #!/bin/sh
+    set -ex
+    REF="${URI#oci:}"
+    mkdir -p "${DEST}"
+    oras blob fetch --plain-http "${REF}" --output - | tar -xzf - -C "${DEST}"
+    echo "Restored artifact to ${DEST}"
+---
+# Task: git-clone-oci
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone-oci
+spec:
+  params:
+    - name: url
+    - name: revision
+      default: main
+    - name: artifact-store
+  results:
+    - name: commit
+    - name: source-artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: clone
+      image: cgr.dev/chainguard/git:latest
+      env:
+        - name: GIT_URL
+          value: $(params.url)
+        - name: GIT_REVISION
+          value: $(params.revision)
+      script: |
+        #!/bin/sh
+        set -ex
+        cd /var/workdir
+        git clone --depth 1 --branch "${GIT_REVISION}" "${GIT_URL}" source
+        cd source
+        echo -n "$(git rev-parse HEAD)" > $(results.commit.path)
+    - name: create-source-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: source
+        - name: path
+          value: /var/workdir/source
+    - name: export-result
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: URI
+          value: $(steps.create-source-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${URI}" > $(results.source-artifact.path)
+---
+# Task: build-image
+# Builds a container image, writes images-manifest.json for later attachment.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-image
+spec:
+  params:
+    - name: source-artifact
+    - name: image-registry
+    - name: image-tag
+      default: latest
+    - name: artifact-store
+  results:
+    - name: image-ref
+      description: Full image reference with digest
+    - name: images-artifact
+      description: OCI URI for the images manifest artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: use-source
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.source-artifact)
+        - name: path
+          value: /var/workdir/source
+    - name: build
+      image: ghcr.io/ko-build/ko:latest
+      env:
+        - name: KO_DOCKER_REPO
+          value: $(params.image-registry)
+        - name: IMAGE_TAG
+          value: $(params.image-tag)
+      script: |
+        #!/bin/sh
+        set -ex
+        cd /var/workdir/source
+        export GOFLAGS="-buildvcs=false"
+        IMAGE_REF=$(ko build ./ \
+          --platform=linux/amd64 \
+          -t "${IMAGE_TAG}" \
+          --bare \
+          --insecure-registry)
+        echo "Built image: ${IMAGE_REF}"
+        echo -n "${IMAGE_REF}" > $(results.image-ref.path)
+
+        cat > /var/workdir/images-manifest.json <<EOF
+        {
+          "images": [
+            {
+              "name": "tekton-experiments",
+              "uri": "${IMAGE_REF}",
+              "digest": "$(echo ${IMAGE_REF} | cut -d@ -f2)",
+              "platform": "linux/amd64",
+              "buildOutput": true
+            }
+          ]
+        }
+        EOF
+    - name: create-images-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: images-manifest.json
+        - name: path
+          value: /var/workdir/images-manifest.json
+    - name: export-result
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: URI
+          value: $(steps.create-images-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${URI}" > $(results.images-artifact.path)
+---
+# Task: run-tests
+# Runs tests, pushes junit + coverage as OCI artifacts.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-tests
+spec:
+  params:
+    - name: source-artifact
+    - name: packages
+      default: "./..."
+    - name: go-version
+      default: "1.26"
+    - name: artifact-store
+  results:
+    - name: tests-passed
+    - name: coverage-pct
+    - name: junit-artifact
+    - name: coverage-artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: use-source
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.source-artifact)
+        - name: path
+          value: /var/workdir/source
+    - name: test
+      image: docker.io/library/golang:$(params.go-version)
+      env:
+        - name: PACKAGES
+          value: $(params.packages)
+      script: |
+        #!/bin/bash
+        set -x
+        cd /var/workdir/source
+        go install gotest.tools/gotestsum@latest
+        PASSED=true
+        gotestsum \
+          --junitfile /var/workdir/junit-results.xml \
+          --format testdox \
+          -- \
+          -coverprofile=/var/workdir/coverage.out \
+          -covermode=atomic \
+          -count=1 \
+          ${PACKAGES} || PASSED=false
+        if [ -f /var/workdir/coverage.out ]; then
+          COV=$(go tool cover -func=/var/workdir/coverage.out | tail -1 | awk '{print $3}')
+          echo -n "${COV}" > $(results.coverage-pct.path)
+        else
+          echo -n "0%" > $(results.coverage-pct.path)
+        fi
+        echo -n "${PASSED}" > $(results.tests-passed.path)
+        [ "${PASSED}" = "true" ] || exit 1
+    - name: create-junit-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: junit-results.xml
+        - name: path
+          value: /var/workdir/junit-results.xml
+    - name: create-coverage-artifact
+      ref:
+        name: create-oci-artifact
+      params:
+        - name: store
+          value: $(params.artifact-store)
+        - name: name
+          value: coverage.out
+        - name: path
+          value: /var/workdir/coverage.out
+    - name: export-results
+      image: docker.io/library/alpine:3.20
+      env:
+        - name: JUNIT_URI
+          value: $(steps.create-junit-artifact.results.uri)
+        - name: COVERAGE_URI
+          value: $(steps.create-coverage-artifact.results.uri)
+      script: |
+        #!/bin/sh
+        echo -n "${JUNIT_URI}" > $(results.junit-artifact.path)
+        echo -n "${COVERAGE_URI}" > $(results.coverage-artifact.path)
+---
+# Task: attach-artifacts
+# Fetches all artifact blobs and attaches them as OCI referrers
+# to the built image using oras attach.
+#
+# After this task, `oras discover <image>` shows all artifacts
+# as a referrer tree — the same way cosign signatures and SBOMs work.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: attach-artifacts
+spec:
+  params:
+    - name: image-ref
+      description: "Built image ref (subject for referrers)"
+    - name: images-artifact
+      description: OCI URI for images manifest
+    - name: junit-artifact
+      description: OCI URI for JUnit results
+    - name: coverage-artifact
+      description: OCI URI for coverage report
+    - name: pipelinerun-name
+      default: unknown
+    - name: git-sha
+      default: unknown
+  results:
+    - name: referrer-count
+      description: Number of referrers attached
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    # Fetch each artifact from OCI storage
+    - name: fetch-images
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.images-artifact)
+        - name: path
+          value: /var/workdir/images
+    - name: fetch-junit
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.junit-artifact)
+        - name: path
+          value: /var/workdir/junit
+    - name: fetch-coverage
+      ref:
+        name: use-oci-artifact
+      params:
+        - name: uri
+          value: $(params.coverage-artifact)
+        - name: path
+          value: /var/workdir/coverage
+    # Attach each artifact as a referrer to the built image
+    - name: attach-referrers
+      image: ghcr.io/oras-project/oras:v1.2.2
+      env:
+        - name: IMAGE_REF
+          value: $(params.image-ref)
+        - name: PIPELINERUN
+          value: $(params.pipelinerun-name)
+        - name: GIT_SHA
+          value: $(params.git-sha)
+      script: |
+        #!/bin/sh
+        set -ex
+
+        COMMON_ANNOT="dev.tekton.artifact/pipelinerun=${PIPELINERUN} dev.tekton.artifact/git-sha=${GIT_SHA}"
+
+        # Copy artifacts to a flat working directory (oras needs relative paths)
+        mkdir -p /tmp/attach
+        cp /var/workdir/images/images-manifest.json /tmp/attach/
+        cp /var/workdir/junit/junit-results.xml /tmp/attach/
+        cp /var/workdir/coverage/coverage.out /tmp/attach/
+        cd /tmp/attach
+
+        attach() {
+          local file="$1" type="$2" task="$3"
+          shift 3
+          ANNOT_FLAGS=""
+          for pair in ${COMMON_ANNOT} "dev.tekton.artifact/task=${task}" "$@"; do
+            ANNOT_FLAGS="${ANNOT_FLAGS} --annotation ${pair}"
+          done
+          oras attach --plain-http \
+            --artifact-type "${type}" \
+            ${ANNOT_FLAGS} \
+            "${IMAGE_REF}" \
+            "${file}:${type}"
+        }
+
+        # Attach images manifest
+        attach images-manifest.json \
+          "application/vnd.tekton.artifact.images.v1+json" \
+          "build-image" \
+          "dev.tekton.artifact/build-output=true"
+
+        # Attach JUnit test results
+        attach junit-results.xml \
+          "application/vnd.tekton.artifact.junit.v1+xml" \
+          "run-tests"
+
+        # Attach coverage report
+        attach coverage.out \
+          "application/vnd.tekton.artifact.coverage.v1" \
+          "run-tests"
+
+        # Verify
+        echo ""
+        echo "=== Referrer tree ==="
+        oras discover --plain-http "${IMAGE_REF}"
+
+        COUNT=$(oras discover --plain-http --format json "${IMAGE_REF}" | grep -c '"artifactType"')
+        echo -n "${COUNT}" > $(results.referrer-count.path)
+
+        echo ""
+        echo "=== Done ==="
+        echo "Attached ${COUNT} referrers to ${IMAGE_REF}"
+        echo ""
+        echo "Discover:     oras discover ${IMAGE_REF}"
+        echo "Pull JUnit:   oras discover ${IMAGE_REF} --artifact-type application/vnd.tekton.artifact.junit.v1+xml"
