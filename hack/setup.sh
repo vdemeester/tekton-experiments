@@ -24,6 +24,9 @@ REGISTRY_HOST="localhost"
 TEKTON_PIPELINE_VERSION="${TEKTON_PIPELINE_VERSION:-v1.11.0}"
 TEKTON_CHAINS_VERSION="${TEKTON_CHAINS_VERSION:-v0.26.2}"
 
+# External registry (optional)
+EXTERNAL_REGISTRY=""
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,6 +37,24 @@ log()  { echo -e "${GREEN}==>${NC} $*"; }
 warn() { echo -e "${YELLOW}==> WARN:${NC} $*"; }
 err()  { echo -e "${RED}==> ERROR:${NC} $*" >&2; }
 
+# ── Parse arguments ─────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        teardown)
+            # Handle below
+            TEARDOWN=true
+            shift
+            ;;
+        --registry)
+            EXTERNAL_REGISTRY="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
 # ── Teardown ────────────────────────────────────────────────────────
 teardown() {
     log "Tearing down..."
@@ -43,7 +64,7 @@ teardown() {
     log "Done."
 }
 
-if [[ "${1:-}" == "teardown" ]]; then
+if [[ "${TEARDOWN:-}" == "true" ]]; then
     teardown
     exit 0
 fi
@@ -190,19 +211,81 @@ kubectl rollout restart deployment tekton-chains-controller -n tekton-chains
 kubectl wait --for=condition=available --timeout=60s \
     deployment/tekton-chains-controller -n tekton-chains
 
-log "Chains configured (OCI storage, insecure registry, cosign keys generated)"
+log "Chains configured (OCI storage, cosign keys generated)"
+
+# ── External registry setup ────────────────────────────────────────
+if [[ -n "${EXTERNAL_REGISTRY}" ]]; then
+    log "Configuring external registry: ${EXTERNAL_REGISTRY}"
+
+    # Determine docker config location
+    DOCKER_CONFIG_DIR="${DOCKER_CONFIG:-${HOME}/.docker}"
+    DOCKER_CONFIG_FILE="${DOCKER_CONFIG_DIR}/config.json"
+
+    if [[ ! -f "${DOCKER_CONFIG_FILE}" ]]; then
+        err "Docker config not found at ${DOCKER_CONFIG_FILE}"
+        err "Please login first: docker login $(echo ${EXTERNAL_REGISTRY} | cut -d/ -f1)"
+        exit 1
+    fi
+
+    # Extract the registry hostname
+    REGISTRY_HOSTNAME=$(echo "${EXTERNAL_REGISTRY}" | cut -d/ -f1)
+
+    # Verify credentials exist for this registry
+    if ! grep -q "${REGISTRY_HOSTNAME}" "${DOCKER_CONFIG_FILE}" 2>/dev/null; then
+        warn "No credentials found for ${REGISTRY_HOSTNAME} in ${DOCKER_CONFIG_FILE}"
+        warn "You may need to: docker login ${REGISTRY_HOSTNAME}"
+    fi
+
+    # Create k8s secret with docker credentials
+    kubectl delete secret registry-credentials --ignore-not-found 2>/dev/null
+    kubectl create secret generic registry-credentials \
+        --from-file=config.json="${DOCKER_CONFIG_FILE}" \
+        --from-file=.dockerconfigjson="${DOCKER_CONFIG_FILE}" \
+        --type=kubernetes.io/dockerconfigjson 2>/dev/null || \
+    kubectl create secret docker-registry registry-credentials \
+        --from-file=.dockerconfigjson="${DOCKER_CONFIG_FILE}" 2>/dev/null || \
+    kubectl create secret generic registry-credentials \
+        --from-file=config.json="${DOCKER_CONFIG_FILE}"
+
+    # Patch default ServiceAccount to use the credentials for image pull/push
+    kubectl patch serviceaccount default -p '{"secrets": [{"name": "registry-credentials"}], "imagePullSecrets": [{"name": "registry-credentials"}]}'
+
+    # Update Chains config — no insecure flag needed, no separate storage repo
+    kubectl patch configmap chains-config -n tekton-chains --type merge -p '{
+      "data": {
+        "storage.oci.repository.insecure": "false"
+      }
+    }'
+    kubectl rollout restart deployment tekton-chains-controller -n tekton-chains
+    kubectl wait --for=condition=available --timeout=60s \
+        deployment/tekton-chains-controller -n tekton-chains
+
+    # Write registry config for run.sh
+    echo "${EXTERNAL_REGISTRY}" > "${KUBECONFIG_PATH%.kubeconfig}.registry"
+
+    log "External registry configured: ${EXTERNAL_REGISTRY}"
+    log "Credentials from: ${DOCKER_CONFIG_FILE}"
+else
+    # Write local registry config for run.sh
+    echo "local" > "${KUBECONFIG_PATH%.kubeconfig}.registry"
+fi
 
 # ── Summary ─────────────────────────────────────────────────────────
 echo ""
 log "Setup complete!"
 echo ""
 echo "  KUBECONFIG:     export KUBECONFIG=${KUBECONFIG_PATH}"
+if [[ -n "${EXTERNAL_REGISTRY}" ]]; then
+echo "  Registry:       ${EXTERNAL_REGISTRY} (external, HTTPS)"
+echo ""
+echo "  Run pipeline:   ./hack/run.sh"
+echo "  Run full:       ./hack/run.sh --full"
+else
 echo "  Registry:       ${REGISTRY_HOST}:${REGISTRY_PORT} (host)"
 echo "                  ${REGISTRY_NAME}:5000 (in-cluster)"
 echo ""
-echo "  Push images:    docker tag myimage ${REGISTRY_HOST}:${REGISTRY_PORT}/myimage"
-echo "                  docker push ${REGISTRY_HOST}:${REGISTRY_PORT}/myimage"
-echo ""
-echo "  In Tekton use:  ${REGISTRY_HOST}:${REGISTRY_PORT}/tekton-experiments"
+echo "  Run pipeline:   ./hack/run.sh"
+echo "  Run full:       ./hack/run.sh --full"
+fi
 echo ""
 echo "  Teardown:       ./hack/setup.sh teardown"

@@ -10,12 +10,32 @@ Phase 2](https://github.com/tektoncd/community/pull/1248).
 ## Setup
 
 ```bash
-# Creates a kind cluster with local registry + Tekton Pipelines + Chains
+# Local registry (default — no auth needed, fully offline)
 ./hack/setup.sh
 export KUBECONFIG=/tmp/tekton-experiments.kubeconfig
 
-# Teardown when done
+# Or with an external registry (ghcr.io, quay.io, etc.)
+./hack/setup.sh --registry ghcr.io/vdemeester
+export KUBECONFIG=/tmp/tekton-experiments.kubeconfig
+
+# Teardown
 ./hack/setup.sh teardown
+```
+
+## Run
+
+```bash
+# Basic referrers pipeline (build + test → attach to image)
+./hack/run.sh
+
+# Full pipeline (+ SBOM via syft, docs, Chains attestation)
+./hack/run.sh --full
+
+# Non-container artifact (binary tarball as subject)
+./hack/run.sh --noimage
+
+# Override registry at run time
+./hack/run.sh --full --registry ghcr.io/vdemeester
 ```
 
 ## Experiments
@@ -36,11 +56,7 @@ image@sha256:8585...           ← the built image
 ```
 
 ```bash
-kubectl apply -f build-artifact-referrers/01-tasks.yaml
-kubectl apply -f build-artifact-referrers/02-pipeline.yaml
-kubectl create -f build-artifact-referrers/run.yaml
-
-# Discover referrers
+./hack/run.sh
 oras discover --plain-http localhost:5555/tekton-experiments:latest
 ```
 
@@ -57,11 +73,7 @@ binary-tarball@sha256:25a1...     ← a .tar.gz, not an image
 ```
 
 ```bash
-kubectl apply -f build-artifact-referrers-noimage/01-tasks.yaml
-kubectl apply -f build-artifact-referrers-noimage/02-pipeline.yaml
-kubectl create -f build-artifact-referrers-noimage/run.yaml
-
-# Discover referrers on a tarball
+./hack/run.sh --noimage
 oras discover --plain-http localhost:5555/tekton-experiments/bin:latest
 ```
 
