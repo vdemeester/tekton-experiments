@@ -1,0 +1,131 @@
+# ⚠️  NON-FUNCTIONAL — proposed TEP-0164 API, not yet implemented.
+#
+# This is the build-artifact-referrers-noimage experiment rewritten.
+# Proves that the declarative artifact API works identically for
+# non-container build outputs (tarballs, RPMs, JARs, etc.).
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-binary
+spec:
+  params:
+    - name: version-tag
+      default: latest
+    - name: go-version
+      default: "1.26"
+  artifacts:
+    inputs:
+      - name: source
+    outputs:
+      - name: binary
+        description: Cross-platform binary tarball
+        buildOutput: true                  # ← this is the referrer subject
+        mediaType: application/gzip        # ← not a container image!
+      - name: build-info
+        description: Build metadata
+        mediaType: application/json
+        storage: inline                    # ← small, keep in status
+  results:
+    - name: platforms
+  steps:
+    - name: build
+      image: docker.io/library/golang:$(params.go-version)
+      script: |
+        #!/bin/bash
+        set -ex
+        cd $(inputs.source.path)
+
+        export GOFLAGS="-buildvcs=false"
+        DIST=$(mktemp -d)
+
+        for GOOS in linux darwin; do
+          for GOARCH in amd64 arm64; do
+            GOOS=${GOOS} GOARCH=${GOARCH} go build \
+              -o ${DIST}/tekton-experiments-${GOOS}-${GOARCH} .
+          done
+        done
+
+        # Write binary tarball to output artifact path
+        tar -czf $(outputs.binary.path)/tekton-experiments-$(params.version-tag).tar.gz \
+          -C ${DIST} .
+
+        # Write build info (small → inline storage)
+        cat > $(outputs.build-info.path)/build-info.json <<EOF
+        {
+          "version": "$(params.version-tag)",
+          "platforms": ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]
+        }
+        EOF
+
+        echo -n "linux/amd64,linux/arm64,darwin/amd64,darwin/arm64" > $(results.platforms.path)
+
+        # ← No oras push. The entrypoint:
+        #   1. Sees content at $(outputs.binary.path)
+        #   2. Computes sha256 digest
+        #   3. Pushes to OCI backend (application/gzip layer)
+        #   4. Since buildOutput: true, this artifact IS the referrer subject
+        #   5. Records URI + digest in TaskRun status
+        #
+        #   For build-info (storage: inline), content is embedded directly
+        #   in TaskRun status — no external storage needed.
+---
+# Pipeline — identical structure to the container image variant.
+# The only difference: build-binary produces a tarball, not an image.
+# TEP-0164 doesn't care — same API.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-binary-and-test
+spec:
+  params:
+    - name: git-url
+      default: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      default: main
+    - name: version-tag
+      default: latest
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+
+    - name: build-binary
+      runAfter: [git-clone]
+      taskRef:
+        name: build-binary
+      artifacts:
+        inputs:
+          - name: source
+            from: tasks.git-clone.outputs.source
+      params:
+        - name: version-tag
+          value: $(params.version-tag)
+
+    - name: run-tests
+      runAfter: [git-clone]
+      taskRef:
+        name: run-tests           # same Task as 01-image-build.yaml!
+      artifacts:
+        inputs:
+          - name: source
+            from: tasks.git-clone.outputs.source
+      params:
+        - name: packages
+          value: "./..."
+
+    # ← No attach task. Controller attaches test-results and coverage
+    #   as referrers to the binary tarball (since it has buildOutput: true).
+    #
+    # Result:
+    #   oras discover registry/bin:v1
+    #   ├── application/vnd.tekton.artifact.junit.v1+xml   (test results)
+    #   └── application/vnd.tekton.artifact.coverage.v1    (coverage)
+    #
+    # Same referrer tree as the container image case, but the subject
+    # is application/gzip — not application/vnd.oci.image.*.

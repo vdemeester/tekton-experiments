@@ -1,0 +1,200 @@
+# ⚠️  NON-FUNCTIONAL — proposed TEP-0164 API, not yet implemented.
+#
+# This is the build-artifact-referrers experiment rewritten with the
+# declarative artifact API. Compare with build-artifact-referrers/01-tasks.yaml
+# to see what TEP-0164 eliminates.
+---
+# No StepActions needed — the controller handles upload/download.
+# No git-clone-oci Task needed — source is a declared artifact.
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: git-clone
+spec:
+  params:
+    - name: url
+    - name: revision
+      default: main
+  results:
+    - name: commit
+  artifacts:
+    outputs:
+      - name: source
+        description: Cloned source code
+  steps:
+    - name: clone
+      image: cgr.dev/chainguard/git:latest
+      script: |
+        #!/bin/sh
+        set -ex
+        # Write directly to the output artifact path — Tekton manages the rest
+        git clone --depth 1 --branch "$(params.revision)" "$(params.url)" $(outputs.source.path)
+        cd $(outputs.source.path)
+        echo -n "$(git rev-parse HEAD)" > $(results.commit.path)
+        # ← No oras push. The entrypoint detects content at $(outputs.source.path),
+        #   computes digest, uploads to configured OCI backend, and records
+        #   the artifact URI + digest in TaskRun status automatically.
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-image
+spec:
+  params:
+    - name: image-registry
+    - name: image-tag
+      default: latest
+  results:
+    - name: image-ref
+  artifacts:
+    inputs:
+      - name: source
+        description: Source code to build
+    outputs:
+      - name: images
+        description: Built image references with digests
+        buildOutput: true   # → Chains treats as SLSA subject
+        mediaType: application/vnd.tekton.artifact.images.v1+json
+  steps:
+    - name: build
+      image: ghcr.io/ko-build/ko:latest
+      script: |
+        #!/bin/sh
+        set -ex
+        # Source is already available — init container fetched + verified it
+        cd $(inputs.source.path)
+
+        export KO_DOCKER_REPO="$(params.image-registry)"
+        IMAGE_REF=$(ko build ./ --platform=linux/amd64 -t "$(params.image-tag)" --bare)
+
+        echo -n "${IMAGE_REF}" > $(results.image-ref.path)
+
+        # Write artifact output — Tekton uploads it and attaches as referrer
+        cat > $(outputs.images.path)/images-manifest.json <<EOF
+        {
+          "images": [{"uri": "${IMAGE_REF}", "digest": "$(echo ${IMAGE_REF} | cut -d@ -f2)"}]
+        }
+        EOF
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-tests
+spec:
+  params:
+    - name: packages
+      default: "./..."
+    - name: go-version
+      default: "1.26"
+  results:
+    - name: tests-passed
+    - name: coverage-pct
+  artifacts:
+    inputs:
+      - name: source
+    outputs:
+      - name: test-results
+        description: JUnit XML test results
+        mediaType: application/vnd.tekton.artifact.junit.v1+xml
+      - name: coverage
+        description: Go test coverage report
+        mediaType: application/vnd.tekton.artifact.coverage.v1
+  steps:
+    - name: test
+      image: docker.io/library/golang:$(params.go-version)
+      script: |
+        #!/bin/bash
+        set -x
+        cd $(inputs.source.path)
+
+        go install gotest.tools/gotestsum@latest
+
+        PASSED=true
+        gotestsum \
+          --junitfile $(outputs.test-results.path)/junit-results.xml \
+          --format testdox \
+          -- \
+          -coverprofile=$(outputs.coverage.path)/coverage.out \
+          -covermode=atomic \
+          -count=1 \
+          $(params.packages) || PASSED=false
+
+        if [ -f $(outputs.coverage.path)/coverage.out ]; then
+          COV=$(go tool cover -func=$(outputs.coverage.path)/coverage.out | tail -1 | awk '{print $3}')
+          echo -n "${COV}" > $(results.coverage-pct.path)
+        else
+          echo -n "0%" > $(results.coverage-pct.path)
+        fi
+
+        echo -n "${PASSED}" > $(results.tests-passed.path)
+        [ "${PASSED}" = "true" ] || exit 1
+        # ← No oras push. No export step. The entrypoint handles upload
+        #   of both outputs.test-results and outputs.coverage automatically.
+---
+# The Pipeline — dramatically simpler.
+# No artifact-store param. No attach task. No URI plumbing.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-and-test
+spec:
+  params:
+    - name: git-url
+      default: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      default: main
+    - name: image-registry
+      default: ghcr.io/vdemeester/tekton-experiments
+    - name: version-tag
+      default: latest
+  results:
+    - name: image-ref
+      value: $(tasks.build-image.results.image-ref)
+    - name: tests-passed
+      value: $(tasks.run-tests.results.tests-passed)
+    - name: coverage
+      value: $(tasks.run-tests.results.coverage-pct)
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+
+    - name: build-image
+      runAfter: [git-clone]
+      taskRef:
+        name: build-image
+      artifacts:
+        inputs:
+          - name: source
+            from: tasks.git-clone.outputs.source   # ← declarative binding
+      params:
+        - name: image-registry
+          value: $(params.image-registry)
+        - name: image-tag
+          value: $(params.version-tag)
+
+    - name: run-tests
+      runAfter: [git-clone]
+      taskRef:
+        name: run-tests
+      artifacts:
+        inputs:
+          - name: source
+            from: tasks.git-clone.outputs.source   # ← declarative binding
+      params:
+        - name: packages
+          value: "./..."
+
+    # ← No "attach" or "bundle" task.
+    # The controller automatically:
+    # 1. Uploads each output artifact to the configured OCI backend
+    # 2. Attaches them as referrers to build outputs (buildOutput: true)
+    # 3. Groups all artifacts under the PipelineRun via OCI referrers
+    # 4. Records URIs + digests in TaskRun/PipelineRun status
+    # 5. Chains reads the status and creates SLSA attestations

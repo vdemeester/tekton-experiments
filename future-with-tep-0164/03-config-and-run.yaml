@@ -1,0 +1,101 @@
+# ⚠️  NON-FUNCTIONAL — proposed TEP-0164 API, not yet implemented.
+#
+# Cluster-level configuration and example PipelineRuns.
+# This is applied once by the platform operator.
+---
+# Storage backend configuration — applied once per cluster/namespace.
+# This replaces all the --plain-http, artifact-store params, and
+# registry config scattered across tasks in the PoC.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-artifact-storage
+  namespace: tekton-pipelines
+data:
+  # Enable external artifact storage
+  enabled: "true"
+
+  # Default backend: oci (alternatives: s3, gcs, pvc)
+  backend: "oci"
+
+  # Artifacts smaller than this are stored inline in TaskRun status
+  inline-threshold: "1024"
+
+  # OCI registry for artifact storage
+  oci.repository: "ghcr.io/vdemeester/tekton-experiments/artifacts"
+
+  # Tag pattern — variables: {{namespace}}, {{pipelinerun}}, {{taskrun}}, {{artifact}}
+  oci.tagPattern: "{{namespace}}-{{pipelinerun}}-{{artifact}}"
+
+  # Group artifacts per PipelineRun using OCI referrers
+  oci.groupByPipelineRun: "true"
+
+  # Attach output artifacts as referrers to buildOutput artifacts
+  oci.attachReferrers: "true"
+---
+# PipelineRun for the container image build.
+# Compare with build-artifact-referrers/run.yaml — no artifact-store,
+# no bundle-registry, no workspaces, no volume claims.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: build-and-test-
+spec:
+  pipelineRef:
+    name: build-and-test
+  params:
+    - name: git-url
+      value: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      value: main
+    - name: image-registry
+      value: ghcr.io/vdemeester/tekton-experiments
+    - name: version-tag
+      value: v1.0.0
+  # That's it. No workspaces. No artifact-store. No bundle-registry.
+  # The controller reads config-artifact-storage and handles everything.
+  #
+  # After completion:
+  #   oras discover ghcr.io/vdemeester/tekton-experiments:v1.0.0
+  #   ├── application/vnd.tekton.artifact.images.v1+json   (from build-image)
+  #   ├── application/vnd.tekton.artifact.junit.v1+xml     (from run-tests)
+  #   ├── application/vnd.tekton.artifact.coverage.v1      (from run-tests)
+  #   └── in-toto attestation                              (from Tekton Chains)
+---
+# PipelineRun for the binary tarball build.
+# Exactly the same simplicity — only the pipeline name differs.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: build-binary-
+spec:
+  pipelineRef:
+    name: build-binary-and-test
+  params:
+    - name: git-url
+      value: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      value: main
+    - name: version-tag
+      value: v1.0.0
+  # After completion:
+  #   oras discover ghcr.io/vdemeester/tekton-experiments/artifacts:default-build-binary-xxx-binary
+  #   ├── application/vnd.tekton.artifact.junit.v1+xml     (from run-tests)
+  #   └── application/vnd.tekton.artifact.coverage.v1      (from run-tests)
+  #
+  # Pull the binary:
+  #   oras pull ghcr.io/vdemeester/tekton-experiments/artifacts:default-build-binary-xxx-binary
+---
+# Per-namespace override (optional).
+# Teams can point to their own registry without touching Pipeline specs.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config-artifact-storage
+  namespace: team-frontend
+  labels:
+    tekton.dev/config-type: artifact-storage
+data:
+  backend: "oci"
+  oci.repository: "team-frontend-registry.example.com/artifacts"
+  oci.credentialsSecret: "team-frontend-registry-creds"

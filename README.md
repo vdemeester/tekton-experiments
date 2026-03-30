@@ -98,7 +98,32 @@ oras discover --plain-http localhost:5555/tekton-experiments/bin:latest
 | Ecosystem fit | Custom convention | Native (cosign, SBOM, Chains) |
 | History | One snapshot per tag | Referrers accumulate per image digest |
 
-Both approaches use the same **shared primitives**:
+### [`future-with-tep-0164`](future-with-tep-0164/) — What it looks like with TEP-0164
+
+**Non-functional YAML** showing the same experiments rewritten with the
+proposed declarative artifact API. Side-by-side comparison of today vs
+tomorrow — ~60% fewer lines, no StepActions, no attach task, no
+artifact URI plumbing.
+
+```yaml
+# Today: 7 steps per task (fetch, build, push, export...)
+# TEP-0164: 1 step per task (just build)
+artifacts:
+  inputs:
+    - name: source
+  outputs:
+    - name: test-results
+      mediaType: application/vnd.tekton.artifact.junit.v1+xml
+steps:
+  - name: test
+    script: |
+      cd $(inputs.source.path)                              # ← auto-fetched
+      gotestsum --junitfile $(outputs.test-results.path)/... # ← auto-uploaded
+```
+
+---
+
+All approaches use the same **shared primitives**:
 - `create-oci-artifact` / `use-oci-artifact` StepActions for OCI transport
 - `emptyDir` volumes (no PVCs)
 - `oras` for OCI artifact operations
