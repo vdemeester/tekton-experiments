@@ -193,8 +193,14 @@ spec:
 
     # ← No "attach" or "bundle" task.
     # The controller automatically:
-    # 1. Uploads each output artifact to the configured OCI backend
-    # 2. Attaches them as referrers to build outputs (buildOutput: true)
-    # 3. Groups all artifacts under the PipelineRun via OCI referrers
-    # 4. Records URIs + digests in TaskRun/PipelineRun status
-    # 5. Chains reads the status and creates SLSA attestations
+    # 1. During the run: uploads each output artifact to oci.repository
+    #    (the staging repo from config-artifact-storage) for task-to-task
+    #    passing.
+    # 2. After the run: attaches artifacts as referrers to the build
+    #    output (buildOutput: true). OCI referrers MUST live in the
+    #    same repo as their subject, so the controller pushes referrer
+    #    manifests into the IMAGE's repository (e.g. ghcr.io/org/project),
+    #    NOT into the staging repo. Blobs are cross-mounted or re-uploaded.
+    # 3. Groups all artifacts under the PipelineRun via OCI referrers.
+    # 4. Records URIs + digests in TaskRun/PipelineRun status.
+    # 5. Chains reads the status and creates SLSA attestations.

@@ -122,10 +122,16 @@ spec:
     # ← No attach task. Controller attaches test-results and coverage
     #   as referrers to the binary tarball (since it has buildOutput: true).
     #
+    # Unlike the container image case, the binary tarball is stored in
+    # the artifact staging repo (oci.repository) since there's no
+    # external image registry involved. The referrers are attached in
+    # the SAME repository — no cross-repo push needed.
+    #
     # Result:
-    #   oras discover registry/bin:v1
+    #   oras discover ghcr.io/org/project/artifacts:ns-run-binary
     #   ├── application/vnd.tekton.artifact.junit.v1+xml   (test results)
     #   └── application/vnd.tekton.artifact.coverage.v1    (coverage)
     #
     # Same referrer tree as the container image case, but the subject
     # is application/gzip — not application/vnd.oci.image.*.
+    # And everything lives in one repo (the artifact store).

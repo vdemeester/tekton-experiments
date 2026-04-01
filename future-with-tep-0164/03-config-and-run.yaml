@@ -21,17 +21,37 @@ data:
   # Artifacts smaller than this are stored inline in TaskRun status
   inline-threshold: "1024"
 
-  # OCI registry for artifact storage
+  # ── Artifact staging (task-to-task passing) ──────────────────────
+  # OCI repository for intermediate artifact storage.
+  # This is where artifacts are pushed during a run so downstream
+  # tasks can consume them. This is a STAGING area, not where
+  # referrers end up (see oci.attachReferrers below).
   oci.repository: "ghcr.io/vdemeester/tekton-experiments/artifacts"
 
   # Tag pattern — variables: {{namespace}}, {{pipelinerun}}, {{taskrun}}, {{artifact}}
   oci.tagPattern: "{{namespace}}-{{pipelinerun}}-{{artifact}}"
 
+  # ── Referrer attachment (supply chain graph) ───────────────────
+  # When enabled, the controller attaches output artifacts as OCI
+  # referrers to the buildOutput artifact after the PipelineRun
+  # completes.
+  #
+  # IMPORTANT: OCI referrers MUST live in the same repository as
+  # their subject (per OCI Distribution Spec). When the build output
+  # is an image (e.g. ghcr.io/org/project:v1), the controller must
+  # push referrer manifests into ghcr.io/org/project — NOT into
+  # oci.repository. This means:
+  #   - The controller needs push access to the build output's repo
+  #   - Artifact blobs are cross-mounted or re-uploaded there
+  #   - oci.repository is only used for staging, not for referrers
+  #
+  # For pipelines without a container image build output (e.g. binary
+  # tarballs stored in oci.repository itself), referrers are attached
+  # within oci.repository since the subject lives there too.
+  oci.attachReferrers: "true"
+
   # Group artifacts per PipelineRun using OCI referrers
   oci.groupByPipelineRun: "true"
-
-  # Attach output artifacts as referrers to buildOutput artifacts
-  oci.attachReferrers: "true"
 ---
 # PipelineRun for the container image build.
 # Compare with build-artifact-referrers/run.yaml — no artifact-store,
@@ -54,6 +74,14 @@ spec:
       value: v1.0.0
   # That's it. No workspaces. No artifact-store. No bundle-registry.
   # The controller reads config-artifact-storage and handles everything.
+  #
+  # Under the hood, two repos are involved:
+  #   ghcr.io/vdemeester/tekton-experiments/artifacts  <- staging (task-to-task)
+  #   ghcr.io/vdemeester/tekton-experiments             <- referrers (same repo as image)
+  #
+  # The controller pushes referrer manifests into the IMAGE's repo
+  # (not the staging repo), because OCI referrers must live in the
+  # same repository as their subject.
   #
   # After completion, cosign tree shows the full supply chain:
   #   cosign tree ghcr.io/vdemeester/tekton-experiments:v1.0.0

@@ -46,6 +46,73 @@ The cluster-level configuration and PipelineRun that ties it together.
 - `config-artifact-storage` ConfigMap configures OCI backend once
 - PipelineRun has zero artifact boilerplate — just params
 
+### Artifact storage vs referrer attachment
+
+These are two **distinct** concerns that TEP-0164 must handle separately:
+
+#### 1. Artifact storage (passing data between tasks)
+
+When a task produces an output artifact (source code, test results, coverage),
+the controller uploads it to a **staging repository** configured in
+`config-artifact-storage`. This is an OCI repository used purely for
+intermediate data transfer — the equivalent of today's `oras push` to
+`artifact-store`.
+
+Example: `ghcr.io/org/project/artifacts:ns-pipelinerun-junit`
+
+#### 2. Referrer attachment (supply chain graph on the build output)
+
+When `oci.attachReferrers: "true"` is set and a pipeline has a
+`buildOutput: true` artifact, the controller must **re-push** (or
+cross-mount) those artifacts into the **subject's repository** with a
+`subject` descriptor pointing to the build output's digest.
+
+This is required by the [OCI Distribution Spec](https://github.com/opencontainers/distribution-spec/blob/main/spec.md#listing-referrers):
+
+> Each descriptor is of an image manifest or index **in the same `<name>`
+> namespace** with a `subject` field that specifies the value of `<digest>`.
+
+Referrers **cannot** cross repository boundaries. A manifest in
+`ghcr.io/org/project/artifacts` cannot be a referrer to an image in
+`ghcr.io/org/project`. The referrer manifest must live in the same
+repository as its subject.
+
+#### What the controller must do
+
+For a pipeline with `buildOutput: true`:
+
+1. **During the run**: store intermediate artifacts in `oci.repository`
+   (the staging repo) for task-to-task passing.
+2. **After the run**: for each output artifact, push a manifest into
+   the **build output's repository** with `subject` set to the build
+   output's digest. This is the equivalent of `oras attach`.
+
+For a pipeline **without** `buildOutput` (e.g. binary tarball builds
+where the artifact store *is* the final location), referrers are
+attached within the artifact store repo itself.
+
+```
+# Image build: two repos involved
+ghcr.io/org/project/artifacts   ← staging (task-to-task passing)
+ghcr.io/org/project             ← referrers live here (same repo as image)
+
+# Binary build: one repo
+ghcr.io/org/project/artifacts   ← both staging AND referrer subject
+```
+
+#### Cross-registry implications
+
+If the build output lives in a different registry than the artifact
+storage (e.g. image pushed to `quay.io/org/project` but artifacts
+stored in `ghcr.io/org/project/artifacts`), the controller must:
+- Have push credentials for the build output's registry
+- Cross-mount or re-upload artifact blobs into that registry
+- Push referrer manifests there
+
+This should be clearly documented and the controller should fail
+gracefully (with a warning, not a pipeline failure) if it cannot
+attach referrers due to missing credentials or registry limitations.
+
 ### Chains integration
 
 With TEP-0164, Chains integration becomes seamless:
@@ -53,6 +120,12 @@ With TEP-0164, Chains integration becomes seamless:
 - No `IMAGE_URL`/`IMAGE_DIGEST` type hinting needed — the controller provides artifact metadata
 - Chains attestations, cosign signatures, and build artifacts all appear as OCI referrers
 - The full supply chain graph is visible via `cosign tree` or `oras discover`
+
+Chains attestations follow the same OCI referrer constraint — they
+must be pushed to the **subject's repository**. Today this works
+because Chains knows the image ref directly. With TEP-0164, the
+controller provides this metadata to Chains via TaskRun/PipelineRun
+status, so Chains doesn't need type-hinted result names.
 
 Today's PoC already demonstrates this on ghcr.io (see `build-artifact-referrers/`),
 but TEP-0164 eliminates the manual plumbing required to make it work.
