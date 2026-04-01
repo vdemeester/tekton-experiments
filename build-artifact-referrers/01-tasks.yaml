@@ -13,6 +13,9 @@ spec:
       description: Artifact name (used as layer filename)
     - name: path
       description: Path to the file or directory to archive and push
+    - name: insecure
+      description: Use plain HTTP for registry
+      default: "false"
   results:
     - name: uri
       description: "OCI artifact URI: oci:<repo>@sha256:<digest>"
@@ -24,6 +27,8 @@ spec:
       value: $(params.name)
     - name: ARTIFACT_PATH
       value: $(params.path)
+    - name: INSECURE
+      value: $(params.insecure)
   script: |
     #!/bin/sh
     set -ex
@@ -56,12 +61,17 @@ spec:
       description: "OCI artifact URI: oci:<repo>@sha256:<digest>"
     - name: path
       description: Path to extract the artifact to
+    - name: insecure
+      description: Use plain HTTP for registry
+      default: "false"
   image: ghcr.io/oras-project/oras:v1.2.2
   env:
     - name: URI
       value: $(params.uri)
     - name: DEST
       value: $(params.path)
+    - name: INSECURE
+      value: $(params.insecure)
   script: |
     #!/bin/sh
     set -ex
@@ -123,6 +133,8 @@ spec:
           value: source
         - name: path
           value: /var/workdir/source
+        - name: insecure
+          value: $(params.insecure)
     - name: export-result
       image: docker.io/library/alpine:3.20
       env:
@@ -177,6 +189,8 @@ spec:
           value: $(params.source-artifact)
         - name: path
           value: /var/workdir/source
+        - name: insecure
+          value: $(params.insecure)
     - name: build
       image: ghcr.io/ko-build/ko:latest
       env:
@@ -224,6 +238,8 @@ spec:
           value: images-manifest.json
         - name: path
           value: /var/workdir/images-manifest.json
+        - name: insecure
+          value: $(params.insecure)
     - name: export-result
       image: docker.io/library/alpine:3.20
       env:
@@ -273,6 +289,8 @@ spec:
           value: $(params.source-artifact)
         - name: path
           value: /var/workdir/source
+        - name: insecure
+          value: $(params.insecure)
     - name: test
       image: docker.io/library/golang:$(params.go-version)
       env:
@@ -310,6 +328,8 @@ spec:
           value: junit-results.xml
         - name: path
           value: /var/workdir/junit-results.xml
+        - name: insecure
+          value: $(params.insecure)
     - name: create-coverage-artifact
       ref:
         name: create-oci-artifact
@@ -320,6 +340,8 @@ spec:
           value: coverage.out
         - name: path
           value: /var/workdir/coverage.out
+        - name: insecure
+          value: $(params.insecure)
     - name: export-results
       image: docker.io/library/alpine:3.20
       env:
@@ -381,6 +403,8 @@ spec:
           value: $(params.images-artifact)
         - name: path
           value: /var/workdir/images
+        - name: insecure
+          value: $(params.insecure)
     - name: fetch-junit
       ref:
         name: use-oci-artifact
@@ -389,6 +413,8 @@ spec:
           value: $(params.junit-artifact)
         - name: path
           value: /var/workdir/junit
+        - name: insecure
+          value: $(params.insecure)
     - name: fetch-coverage
       ref:
         name: use-oci-artifact
@@ -397,6 +423,8 @@ spec:
           value: $(params.coverage-artifact)
         - name: path
           value: /var/workdir/coverage
+        - name: insecure
+          value: $(params.insecure)
     # Attach each artifact as a referrer to the built image
     - name: attach-referrers
       image: ghcr.io/oras-project/oras:v1.2.2

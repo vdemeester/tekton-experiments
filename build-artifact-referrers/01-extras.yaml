@@ -13,6 +13,8 @@ spec:
     - name: image-ref
       description: Image to scan
     - name: artifact-store
+    - name: insecure
+      default: "false"
   results:
     - name: sbom-artifact
   volumes:
@@ -46,6 +48,8 @@ spec:
           value: sbom.spdx.json
         - name: path
           value: /var/workdir/sbom.spdx.json
+        - name: insecure
+          value: $(params.insecure)
     - name: export-result
       image: docker.io/library/alpine:3.20
       env:
@@ -68,6 +72,8 @@ spec:
     - name: go-version
       default: "1.26"
     - name: artifact-store
+    - name: insecure
+      default: "false"
   results:
     - name: docs-artifact
   volumes:
@@ -86,6 +92,8 @@ spec:
           value: $(params.source-artifact)
         - name: path
           value: /var/workdir/source
+        - name: insecure
+          value: $(params.insecure)
     - name: generate
       image: docker.io/library/golang:$(params.go-version)
       script: |
@@ -131,6 +139,8 @@ spec:
           value: docs
         - name: path
           value: /var/workdir/docs
+        - name: insecure
+          value: $(params.insecure)
     - name: export-result
       image: docker.io/library/alpine:3.20
       env:
@@ -158,6 +168,8 @@ spec:
       default: unknown
     - name: git-sha
       default: unknown
+    - name: insecure
+      default: "false"
   results:
     - name: referrer-count
   volumes:
@@ -176,6 +188,8 @@ spec:
           value: $(params.images-artifact)
         - name: path
           value: /var/workdir/images
+        - name: insecure
+          value: $(params.insecure)
     - name: fetch-junit
       ref:
         name: use-oci-artifact
@@ -184,6 +198,8 @@ spec:
           value: $(params.junit-artifact)
         - name: path
           value: /var/workdir/junit
+        - name: insecure
+          value: $(params.insecure)
     - name: fetch-coverage
       ref:
         name: use-oci-artifact
@@ -192,6 +208,8 @@ spec:
           value: $(params.coverage-artifact)
         - name: path
           value: /var/workdir/coverage
+        - name: insecure
+          value: $(params.insecure)
     - name: fetch-sbom
       ref:
         name: use-oci-artifact
@@ -200,6 +218,8 @@ spec:
           value: $(params.sbom-artifact)
         - name: path
           value: /var/workdir/sbom
+        - name: insecure
+          value: $(params.insecure)
     - name: fetch-docs
       ref:
         name: use-oci-artifact
@@ -208,6 +228,8 @@ spec:
           value: $(params.docs-artifact)
         - name: path
           value: /var/workdir/docs
+        - name: insecure
+          value: $(params.insecure)
     - name: attach-referrers
       image: ghcr.io/oras-project/oras:v1.2.2
       env:
@@ -217,6 +239,8 @@ spec:
           value: $(params.pipelinerun-name)
         - name: GIT_SHA
           value: $(params.git-sha)
+        - name: INSECURE
+          value: $(params.insecure)
       script: |
         #!/bin/sh
         set -ex
@@ -240,7 +264,9 @@ spec:
           for pair in ${COMMON} "dev.tekton.artifact/task=${task}" "$@"; do
             ANNOT_FLAGS="${ANNOT_FLAGS} --annotation ${pair}"
           done
-          oras attach --plain-http \
+          ORAS_OPTS=""
+          [ "${INSECURE:-false}" = "true" ] && ORAS_OPTS="--plain-http"
+          oras attach ${ORAS_OPTS} \
             --artifact-type "${type}" \
             ${ANNOT_FLAGS} \
             "${IMAGE_REF}" \
@@ -270,9 +296,11 @@ spec:
 
         echo ""
         echo "=== Referrer tree ==="
-        oras discover --plain-http "${IMAGE_REF}"
+        ORAS_OPTS=""
+        [ "${INSECURE:-false}" = "true" ] && ORAS_OPTS="--plain-http"
+        oras discover ${ORAS_OPTS} "${IMAGE_REF}"
 
-        COUNT=$(oras discover --plain-http --format json "${IMAGE_REF}" | grep -c '"artifactType"')
+        COUNT=$(oras discover ${ORAS_OPTS} --format json "${IMAGE_REF}" | grep -c '"artifactType"')
         echo -n "${COUNT}" > $(results.referrer-count.path)
 
         echo ""

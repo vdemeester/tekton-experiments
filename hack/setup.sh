@@ -17,6 +17,7 @@ set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-tekton-experiments}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-/tmp/${CLUSTER_NAME}.kubeconfig}"
+export KUBECONFIG="${KUBECONFIG_PATH}"
 REGISTRY_NAME="${REGISTRY_NAME:-tekton-registry}"
 REGISTRY_PORT="${REGISTRY_PORT:-5555}"
 REGISTRY_HOST="localhost"
@@ -58,7 +59,7 @@ done
 # ── Teardown ────────────────────────────────────────────────────────
 teardown() {
     log "Tearing down..."
-    kind delete cluster --name "${CLUSTER_NAME}" 2>/dev/null || true
+    kind delete cluster --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG_PATH}" 2>/dev/null || true
     docker rm -f "${REGISTRY_NAME}" 2>/dev/null || true
     rm -f "${KUBECONFIG_PATH}"
     log "Done."
@@ -108,8 +109,6 @@ nodes:
   - role: control-plane
 EOF
 fi
-
-export KUBECONFIG="${KUBECONFIG_PATH}"
 
 # ── Connect registry to kind network ───────────────────────────────
 if ! docker network inspect kind | grep -q "${REGISTRY_NAME}"; then

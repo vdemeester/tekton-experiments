@@ -16,6 +16,7 @@ REPO_DIR="$(dirname "${SCRIPT_DIR}")"
 
 CLUSTER_NAME="${CLUSTER_NAME:-tekton-experiments}"
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-/tmp/${CLUSTER_NAME}.kubeconfig}"
+export KUBECONFIG="${KUBECONFIG_PATH}"
 REGISTRY_CONFIG="${KUBECONFIG_PATH%.kubeconfig}.registry"
 
 # Defaults
@@ -59,8 +60,6 @@ if [[ -z "${REGISTRY}" ]]; then
         REGISTRY="local"
     fi
 fi
-
-export KUBECONFIG="${KUBECONFIG_PATH}"
 
 # ── Apply resources ─────────────────────────────────────────────────
 log "Applying tasks and pipeline..."

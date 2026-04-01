@@ -29,6 +29,8 @@ spec:
       default: tekton-registry:5000/tekton-experiments/artifacts
     - name: version-tag
       default: latest
+    - name: insecure
+      default: "false"
   results:
     - name: image-ref
       value: $(tasks.build-image.results.image-ref)
@@ -50,6 +52,8 @@ spec:
           value: $(params.git-revision)
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     # 2a. Build container image (parallel)
     - name: build-image
@@ -65,6 +69,8 @@ spec:
           value: $(params.version-tag)
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     # 2b. Run tests (parallel)
     - name: run-tests
@@ -78,6 +84,8 @@ spec:
           value: "./..."
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     # 2c. Generate docs (parallel)
     - name: generate-docs
@@ -89,6 +97,8 @@ spec:
           value: $(tasks.git-clone.results.source-artifact)
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     # 3. Generate SBOM (needs the built image)
     - name: generate-sbom
@@ -100,6 +110,8 @@ spec:
           value: $(tasks.build-image.results.image-ref)
         - name: artifact-store
           value: $(params.artifact-store)
+        - name: insecure
+          value: $(params.insecure)
 
     # 4. Attach everything as referrers to the built image
     - name: attach
@@ -123,6 +135,8 @@ spec:
           value: $(context.pipelineRun.name)
         - name: git-sha
           value: $(tasks.git-clone.results.commit)
+        - name: insecure
+          value: $(params.insecure)
 
     # Chains adds SLSA attestation automatically after build-image completes.
     # No task needed — the controller watches TaskRun completions.
