@@ -60,6 +60,7 @@ done
 # ── Teardown ────────────────────────────────────────────────────────
 teardown() {
     log "Tearing down..."
+    helm uninstall vector -n vector --kubeconfig "${KUBECONFIG_PATH}" 2>/dev/null || true
     kind delete cluster --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG_PATH}" 2>/dev/null || true
     docker rm -f "${REGISTRY_NAME}" 2>/dev/null || true
     rm -f "${KUBECONFIG_PATH}"
@@ -72,7 +73,7 @@ if [[ "${TEARDOWN:-}" == "true" ]]; then
 fi
 
 # ── Prerequisites ───────────────────────────────────────────────────
-for cmd in kind kubectl docker; do
+for cmd in kind kubectl docker helm; do
     if ! command -v "$cmd" &>/dev/null; then
         err "$cmd is required but not found"
         exit 1
@@ -260,6 +261,231 @@ kubectl create clusterrolebinding tekton-results-readonly-binding \
 
 log "Tekton Results ${TEKTON_RESULTS_VERSION} ready"
 
+# ── Install MinIO (S3-compatible object storage) ────────────────────
+log "Installing MinIO..."
+
+MINIO_ACCESS_KEY="minioadmin"
+MINIO_SECRET_KEY="minioadmin"
+
+kubectl create namespace minio 2>/dev/null || true
+
+kubectl create secret generic minio-credentials \
+    -n minio \
+    --from-literal=access-key="${MINIO_ACCESS_KEY}" \
+    --from-literal=secret-key="${MINIO_SECRET_KEY}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+cat <<'MINIO_EOF' | kubectl apply -n minio -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+spec:
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: secret-key
+          ports:
+            - containerPort: 9000
+            - containerPort: 9001
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  selector:
+    app: minio
+  ports:
+    - name: api
+      port: 9000
+    - name: console
+      port: 9001
+MINIO_EOF
+
+log "Waiting for MinIO..."
+kubectl wait --for=condition=available --timeout=120s \
+    deployment/minio -n minio
+
+# Create buckets
+log "Creating MinIO buckets..."
+kubectl run minio-setup --rm -i --restart=Never \
+    -n minio \
+    --image=quay.io/minio/mc:latest \
+    --command -- sh -c '
+    mc alias set local http://minio:9000 minioadmin minioadmin &&
+    mc mb --ignore-existing local/tekton-logs &&
+    mc mb --ignore-existing local/tekton-archive &&
+    echo "Buckets created:"
+    mc ls local/
+'
+
+log "MinIO ready (buckets: tekton-logs, tekton-archive)"
+
+# ── Install Vector (log forwarder) ──────────────────────────────────
+log "Installing Vector via Helm..."
+
+helm repo add vector https://helm.vector.dev 2>/dev/null || true
+helm repo update vector 2>/dev/null || true
+
+kubectl create namespace vector 2>/dev/null || true
+
+# Create Vector config as a ConfigMap (avoids Helm Go template conflicts
+# with Vector's {{ }} template syntax in key_prefix)
+cat <<'VECTOR_CM_EOF' | kubectl apply -n vector -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-config
+data:
+  agent.yaml: |
+    data_dir: /vector-data-dir
+    api:
+      enabled: false
+    sources:
+      kubernetes_logs:
+        type: kubernetes_logs
+        extra_label_selector: "app.kubernetes.io/managed-by=tekton-pipelines"
+        fingerprint_lines: 1
+    transforms:
+      remap_logs:
+        type: remap
+        inputs: [kubernetes_logs]
+        source: |-
+          .log_type = "application"
+          .kubernetes_namespace_name = .kubernetes.pod_namespace
+          if exists(.kubernetes.pod_labels."tekton.dev/taskRunUID") {
+            .taskRunUID = del(.kubernetes.pod_labels."tekton.dev/taskRunUID")
+          } else {
+            .taskRunUID = "none"
+          }
+          if exists(.kubernetes.pod_labels."tekton.dev/pipelineRunUID") {
+            .pipelineRunUID = del(.kubernetes.pod_labels."tekton.dev/pipelineRunUID")
+            .result = .pipelineRunUID
+          } else {
+            .result = .taskRunUID
+          }
+          if exists(.kubernetes.pod_labels."tekton.dev/task") {
+            .task = del(.kubernetes.pod_labels."tekton.dev/task")
+          } else {
+            .task = "none"
+          }
+          if exists(.kubernetes.pod_namespace) {
+            .namespace = del(.kubernetes.pod_namespace)
+          } else {
+            .namespace = "unlabeled"
+          }
+          .pod = .kubernetes.pod_name
+          .container = .kubernetes.container_name
+    sinks:
+      minio_s3:
+        type: aws_s3
+        inputs: [remap_logs]
+        bucket: tekton-logs
+        region: us-east-1
+        endpoint: http://minio.minio.svc.cluster.local:9000
+        auth:
+          access_key_id: minioadmin
+          secret_access_key: minioadmin
+        compression: none
+        encoding:
+          codec: text
+        key_prefix: "/logs/{{ namespace }}/{{ result }}/{{ taskRunUID }}/{{ container }}"
+        filename_time_format: ""
+        filename_append_uuid: false
+        batch:
+          timeout_secs: 30
+VECTOR_CM_EOF
+
+helm upgrade --install vector vector/vector \
+    -n vector \
+    --set role=Agent \
+    --set existingConfigMaps[0]=vector-config \
+    --set dataDir=/vector-data-dir \
+    --set service.enabled=false \
+    --wait --timeout 120s
+
+log "Vector ready (forwarding Tekton logs to MinIO)"
+
+# ── Configure Results for logs + retention ──────────────────────────
+log "Configuring Results for S3 log storage + archival retention..."
+
+# Patch the config key inside the configmap (not top-level)
+# We need to replace LOGS_API=false with true and set blob config
+CURRENT_CONFIG=$(kubectl get configmap tekton-results-api-config \
+    -n tekton-pipelines -o jsonpath='{.data.config}')
+
+NEW_CONFIG=$(echo "${CURRENT_CONFIG}" | sed \
+    -e 's|LOGS_API=false|LOGS_API=true|' \
+    -e 's|LOGS_TYPE=File|LOGS_TYPE=Blob|' \
+    -e 's|LOGGING_PLUGIN_API_URL=|LOGGING_PLUGIN_API_URL=s3://tekton-logs|' \
+    -e "s|LOGGING_PLUGIN_QUERY_PARAMS='direction=forward'|LOGGING_PLUGIN_QUERY_PARAMS='v1alpha2LogType=true\&use_path_style=true'|" \
+    -e 's|S3_ENDPOINT=|S3_ENDPOINT=http://minio.minio.svc.cluster.local:9000|' \
+    -e "s|S3_ACCESS_KEY_ID=|S3_ACCESS_KEY_ID=${MINIO_ACCESS_KEY}|" \
+    -e "s|S3_SECRET_ACCESS_KEY=|S3_SECRET_ACCESS_KEY=${MINIO_SECRET_KEY}|" \
+    -e 's|S3_REGION=|S3_REGION=us-east-1|' \
+    -e 's|S3_HOSTNAME_IMMUTABLE=false|S3_HOSTNAME_IMMUTABLE=true|' \
+)
+
+kubectl create configmap tekton-results-api-config \
+    -n tekton-pipelines \
+    --from-literal=config="${NEW_CONFIG}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+# Set retention to 7 years (2555 days)
+kubectl patch configmap tekton-results-config-results-retention-policy \
+    -n tekton-pipelines \
+    --type merge -p '{"data":{"defaultRetention":"2555"}}'
+
+# Restart Results to pick up new config
+kubectl rollout restart deployment tekton-results-api -n tekton-pipelines
+kubectl wait --for=condition=available --timeout=60s \
+    deployment/tekton-results-api -n tekton-pipelines
+
+log "Results configured (S3 logs via MinIO, 7-year retention)"
+
 # ── External registry setup ────────────────────────────────────────
 if [[ -n "${EXTERNAL_REGISTRY}" ]]; then
     log "Configuring external registry: ${EXTERNAL_REGISTRY}"
@@ -336,5 +562,6 @@ echo "  Run full:       ./hack/run.sh --full"
 fi
 echo ""
 echo "  Results API:    kubectl port-forward -n tekton-pipelines svc/tekton-results-api-service 8080:8080"
+echo "  MinIO console:  kubectl port-forward -n minio svc/minio 9001:9001  (minioadmin/minioadmin)"
 echo ""
 echo "  Teardown:       ./hack/setup.sh teardown"
