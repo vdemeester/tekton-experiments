@@ -108,10 +108,16 @@ artifact index from Results records + OCI referrer trees.
 
 ### [`future-with-tep-0164`](future-with-tep-0164/) — What it looks like with TEP-0164
 
-**Non-functional YAML** showing the same experiments rewritten with the
-proposed declarative artifact API. Side-by-side comparison of today vs
-tomorrow — ~60% fewer lines, no StepActions, no attach task, no
-artifact URI plumbing.
+The same experiments rewritten with the proposed declarative artifact API.
+Side-by-side comparison of today vs tomorrow — ~60% fewer lines, no
+StepActions, no attach task, no artifact URI plumbing.
+
+- **[`functional/`](future-with-tep-0164/functional/)** — **Working YAMLs** ✅
+  tested against the [`tep-0164-artifact-transport`](https://github.com/tektoncd/pipeline)
+  branch of tektoncd/pipeline. Full pipeline: `git-clone → {build-image, run-tests}`
+  with declarative artifact bindings, verified end-to-end on kind.
+- Aspirational YAMLs showing the full north-star API (config options,
+  referrer attachment, Chains integration).
 
 ```yaml
 # Today: 7 steps per task (fetch, build, push, export...)
