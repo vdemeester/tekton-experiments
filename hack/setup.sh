@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Setup a kind cluster with a local registry, Tekton Pipelines, and Tekton Chains.
+# Setup a kind cluster with a local registry, Tekton Pipelines, Tekton Chains, and Tekton Results.
 #
 # Usage:
 #   ./hack/setup.sh          # Create cluster + install everything
@@ -24,6 +24,7 @@ REGISTRY_HOST="localhost"
 
 TEKTON_PIPELINE_VERSION="${TEKTON_PIPELINE_VERSION:-v1.11.0}"
 TEKTON_CHAINS_VERSION="${TEKTON_CHAINS_VERSION:-v0.26.2}"
+TEKTON_RESULTS_VERSION="${TEKTON_RESULTS_VERSION:-v0.18.0}"
 
 # External registry (optional)
 EXTERNAL_REGISTRY=""
@@ -212,6 +213,53 @@ kubectl wait --for=condition=available --timeout=60s \
 
 log "Chains configured (OCI storage, cosign keys generated)"
 
+# ── Install Tekton Results ──────────────────────────────────────────
+log "Installing Tekton Results ${TEKTON_RESULTS_VERSION}..."
+
+# Create postgres secret (Results bundles a postgres deployment)
+RESULTS_DB_PASS=$(head -c 32 /dev/urandom | base64 | tr -d '\n/+=' | head -c 24)
+kubectl create secret generic tekton-results-postgres \
+    -n tekton-pipelines \
+    --from-literal=POSTGRES_USER=result \
+    --from-literal=POSTGRES_PASSWORD="${RESULTS_DB_PASS}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+# Generate self-signed TLS cert for Results API
+RESULTS_TLS_DIR=$(mktemp -d)
+openssl req -x509 -newkey rsa:4096 -keyout "${RESULTS_TLS_DIR}/tls.key" \
+    -out "${RESULTS_TLS_DIR}/tls.crt" -days 365 -nodes \
+    -subj "/CN=tekton-results-api-service.tekton-pipelines.svc.cluster.local" \
+    -addext "subjectAltName=DNS:tekton-results-api-service.tekton-pipelines.svc.cluster.local,DNS:localhost" \
+    2>/dev/null
+
+kubectl create secret tls tekton-results-tls \
+    -n tekton-pipelines \
+    --cert="${RESULTS_TLS_DIR}/tls.crt" \
+    --key="${RESULTS_TLS_DIR}/tls.key" \
+    --dry-run=client -o yaml | kubectl apply -f -
+rm -rf "${RESULTS_TLS_DIR}"
+
+# Apply Results release
+kubectl apply -f "https://infra.tekton.dev/tekton-releases/results/previous/${TEKTON_RESULTS_VERSION}/release.yaml"
+
+log "Waiting for Tekton Results..."
+kubectl wait --for=condition=available --timeout=120s \
+    deployment/tekton-results-api -n tekton-pipelines
+kubectl wait --for=condition=available --timeout=120s \
+    deployment/tekton-results-watcher -n tekton-pipelines
+
+# Configure Results: enable log storage
+kubectl patch configmap tekton-results-api-config -n tekton-pipelines \
+    --type merge -p '{"data":{"LOGS_API":"true","LOG_LEVEL":"info"}}' 2>/dev/null || true
+
+# RBAC: allow default SA to query Results API
+kubectl create clusterrolebinding tekton-results-readonly-binding \
+    --clusterrole=tekton-results-readonly \
+    --serviceaccount=default:default \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+log "Tekton Results ${TEKTON_RESULTS_VERSION} ready"
+
 # ── External registry setup ────────────────────────────────────────
 if [[ -n "${EXTERNAL_REGISTRY}" ]]; then
     log "Configuring external registry: ${EXTERNAL_REGISTRY}"
@@ -286,5 +334,7 @@ echo ""
 echo "  Run pipeline:   ./hack/run.sh"
 echo "  Run full:       ./hack/run.sh --full"
 fi
+echo ""
+echo "  Results API:    kubectl port-forward -n tekton-pipelines svc/tekton-results-api-service 8080:8080"
 echo ""
 echo "  Teardown:       ./hack/setup.sh teardown"

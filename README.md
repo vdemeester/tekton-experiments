@@ -87,6 +87,25 @@ oras discover --plain-http localhost:5555/tekton-experiments/bin:latest
 > same mechanism as cosign signatures, SBOMs, and SLSA attestations —
 > no separate convention needed.
 
+### [`results-artifact-archival`](results-artifact-archival/) — Results + Artifact Archival
+
+**Tekton Results** integration showing how OCI artifact metadata gets
+captured, indexed, and made queryable. Bridges artifact creation (OCI
+referrers) with long-term archival and searchability. Scripts demonstrate
+Results API queries with CEL filters and building a complete supply chain
+artifact index from Results records + OCI referrer trees.
+
+```bash
+# Run pipeline with Results query
+./hack/run.sh --full --results
+
+# Query Results API directly
+./results-artifact-archival/01-query-artifacts.sh
+
+# Build full artifact index (Results + OCI referrers)
+./results-artifact-archival/02-artifact-index.sh
+```
+
 ### [`future-with-tep-0164`](future-with-tep-0164/) — What it looks like with TEP-0164
 
 **Non-functional YAML** showing the same experiments rewritten with the

@@ -24,6 +24,7 @@ PIPELINE="build-artifact-referrers"
 PIPELINE_DIR="build-artifact-referrers"
 REGISTRY=""
 FULL=false
+WITH_RESULTS=false
 
 # Colors
 GREEN='\033[0;32m'
@@ -44,6 +45,10 @@ while [[ $# -gt 0 ]]; do
         --noimage)
             PIPELINE="build-artifact-referrers-noimage"
             PIPELINE_DIR="build-artifact-referrers-noimage"
+            shift
+            ;;
+        --results)
+            WITH_RESULTS=true
             shift
             ;;
         *)
@@ -152,4 +157,59 @@ else
     log "Verify Chains attestation:"
     COSIGN_PUB="${KUBECONFIG_PATH%.kubeconfig}.cosign.pub"
     echo "  cosign verify-attestation --key ${COSIGN_PUB} --type slsaprovenance1 ${IMAGE_REGISTRY}:latest"
+fi
+
+# ── Query Results API ───────────────────────────────────────────────
+if [[ "${WITH_RESULTS}" == "true" ]]; then
+    echo ""
+    log "Querying Tekton Results API (waiting for watcher to capture records)..."
+
+    # Wait for Results watcher to store the record
+    for i in $(seq 1 12); do
+        STORED=$(kubectl get pipelinerun "${RUN_NAME}" -o jsonpath='{.metadata.annotations.results\.tekton\.dev/stored}' 2>/dev/null)
+        [[ "${STORED}" == "true" ]] && break
+        sleep 5
+    done
+
+    TOKEN=$(kubectl create token default -n default 2>/dev/null || echo "")
+    kubectl port-forward -n tekton-pipelines svc/tekton-results-api-service 8080:8080 &>/dev/null &
+    PF_PID=$!
+    sleep 2
+
+    CURL_OPTS=(-sk)
+    [[ -n "${TOKEN}" ]] && CURL_OPTS+=(-H "Authorization: Bearer ${TOKEN}")
+    RESULTS_API="https://localhost:8080/apis/results.tekton.dev/v1alpha2"
+
+    # Find the result matching our PipelineRun
+    RESULTS=$(curl "${CURL_OPTS[@]}" "${RESULTS_API}/parents/default/results")
+    RESULT_NAME=$(echo "${RESULTS}" | jq -r --arg rn "${RUN_NAME}" \
+        '.results[] | select(.name | contains($rn)) | .name' | head -1)
+
+    if [[ -n "${RESULT_NAME}" ]]; then
+        log "Results record: ${RESULT_NAME}"
+        RECORDS=$(curl "${CURL_OPTS[@]}" "${RESULTS_API}/parents/default/results/${RESULT_NAME##*/}/records")
+        RECORD_COUNT=$(echo "${RECORDS}" | jq -r '.records | length // 0')
+        log "Found ${RECORD_COUNT} record(s)"
+
+        echo ""
+        log "Artifact references from Results:"
+        echo "${RECORDS}" | jq -r '
+            .records[]
+            | select(.data.type == "tekton.dev/v1.TaskRun")
+            | .data.value' | while IFS= read -r b64; do
+            [[ -z "${b64}" ]] && continue
+            DECODED=$(echo "${b64}" | base64 -d 2>/dev/null) || continue
+            TASK=$(echo "${DECODED}" | jq -r '.metadata.labels["tekton.dev/pipelineTask"] // .metadata.name')
+            RESULTS_LIST=$(echo "${DECODED}" | jq -r '.status.results[]? | "    \(.name) = \(.value)"' 2>/dev/null)
+            if [[ -n "${RESULTS_LIST}" ]]; then
+                echo "  Task: ${TASK}"
+                echo "${RESULTS_LIST}"
+            fi
+        done
+    else
+        log "No Results record found yet for ${RUN_NAME}"
+        log "Records may still be processing. Try: ./results-artifact-archival/01-query-artifacts.sh"
+    fi
+
+    kill ${PF_PID} 2>/dev/null || true
 fi
