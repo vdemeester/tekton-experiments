@@ -1,0 +1,28 @@
+# Functional TEP-0164 PipelineRun — for kind cluster with local registry.
+#
+# Prerequisites:
+#   export KUBECONFIG=/tmp/tekton-tep0164.kubeconfig
+#   kubectl apply -f 01-tasks.yaml
+#   kubectl apply -f 02-pipeline.yaml
+#
+# Run:
+#   kubectl create -f 03-run.yaml
+---
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: build-and-test-
+spec:
+  pipelineRef:
+    name: build-and-test
+  params:
+    - name: git-url
+      value: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      value: main
+    - name: image-registry
+      value: tekton-registry:5000/tekton-experiments
+    - name: version-tag
+      value: latest
+  # That's it. No workspaces. No artifact-store. No bundle-registry.
+  # config-artifact-storage handles OCI backend configuration.

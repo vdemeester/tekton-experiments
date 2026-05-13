@@ -1,0 +1,60 @@
+# Functional TEP-0164 pipeline — works against the tep-0164-artifact-transport branch.
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-and-test
+spec:
+  params:
+    - name: git-url
+      default: https://github.com/vdemeester/tekton-experiments
+    - name: git-revision
+      default: main
+    - name: image-registry
+    - name: version-tag
+      default: latest
+  results:
+    - name: image-ref
+      value: $(tasks.build-image.results.image-ref)
+    - name: tests-passed
+      value: $(tasks.run-tests.results.tests-passed)
+    - name: coverage
+      value: $(tasks.run-tests.results.coverage-pct)
+  tasks:
+    - name: git-clone
+      taskRef:
+        name: git-clone
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+
+    - name: build-image
+      runAfter: [git-clone]
+      taskRef:
+        name: build-image
+      artifacts:
+        inputs:
+          - name: source
+            from: tasks.git-clone.outputs.source
+      params:
+        - name: image-registry
+          value: $(params.image-registry)
+        - name: image-tag
+          value: $(params.version-tag)
+
+    - name: run-tests
+      runAfter: [git-clone]
+      taskRef:
+        name: run-tests
+      artifacts:
+        inputs:
+          - name: source
+            from: tasks.git-clone.outputs.source
+      params:
+        - name: packages
+          value: "./..."
+
+    # ← No "attach" or "bundle" task.
+    # Controller handles referrer attachment automatically after completion.
