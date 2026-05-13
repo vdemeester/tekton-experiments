@@ -479,10 +479,21 @@ kubectl patch configmap tekton-results-config-results-retention-policy \
     -n tekton-pipelines \
     --type merge -p '{"data":{"defaultRetention":"2555"}}'
 
-# Restart Results to pick up new config
+# Add AWS env vars for Go CDK S3 access to MinIO (used by the Blob log plugin)
+kubectl patch deployment tekton-results-api -n tekton-pipelines --type json -p '[
+  {"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "AWS_ACCESS_KEY_ID", "value": "'"${MINIO_ACCESS_KEY}"'"}},
+  {"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "AWS_SECRET_ACCESS_KEY", "value": "'"${MINIO_SECRET_KEY}"'"}},
+  {"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "AWS_REGION", "value": "us-east-1"}},
+  {"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "AWS_ENDPOINT_URL_S3", "value": "http://minio.minio.svc.cluster.local:9000"}},
+  {"op": "add", "path": "/spec/template/spec/containers/0/env/-", "value": {"name": "AWS_S3_USE_PATH_STYLE", "value": "true"}}
+]'
+
+# Restart to pick up all config changes
 kubectl rollout restart deployment tekton-results-api -n tekton-pipelines
 kubectl wait --for=condition=available --timeout=60s \
     deployment/tekton-results-api -n tekton-pipelines
+kubectl wait --for=condition=available --timeout=60s \
+    deployment/tekton-results-watcher -n tekton-pipelines
 
 log "Results configured (S3 logs via MinIO, 7-year retention)"
 
