@@ -58,3 +58,38 @@ git-clone ──→ build-image    (source artifact passed via OCI)
 | StepActions | 2 required | 0 |
 | Attach task | 1 required | 0 |
 | Artifact params | 3-4 per task | 0 |
+
+## Results integration
+
+With Tekton Results deployed, artifact metadata is automatically captured
+and queryable — no extra configuration needed. TEP-0164 populates
+`status.artifacts.outputs` on TaskRuns, which Results watcher stores in
+postgres.
+
+```bash
+# Query artifact inventory from Results API
+./04-query-results.sh
+
+# Query a specific PipelineRun
+./04-query-results.sh build-and-test-xxxxx
+
+# Demonstrate artifact metadata survives CRD deletion
+./05-survive-deletion.sh
+```
+
+### Architecture
+
+```
+PipelineRun completes
+    │
+    ├── Pipeline controller → uploads artifacts to OCI registry
+    │   └── status.artifacts.outputs = [{name, uri, digest}]
+    │
+    └── Results watcher → captures TaskRun/PipelineRun records
+        └── postgres: artifact URIs + digests + results (queryable)
+
+After CRD garbage collection:
+    OCI registry  → artifact blobs (durable)
+    Results API   → artifact metadata (durable, queryable)
+    Cluster       → nothing (CRDs deleted) ← this is fine
+```
